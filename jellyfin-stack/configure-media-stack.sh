@@ -364,29 +364,35 @@ movies_api_key: ${radarr_key}
 EOF
 
   if [[ "$APPLY_TRASH" == "1" ]]; then
-    # Auto-apply a sane TRaSH Guides baseline through Recyclarr's bundled
-    # templates: Sonarr WEB-1080p and Radarr HD Bluray + WEB. Profilarr remains
-    # available for anyone who wants to customize further in the GUI.
-    cat >"${config_dir}/recyclarr.yml" <<'EOF'
-sonarr:
-  series:
-    base_url: !secret series_base_url
-    api_key: !secret series_api_key
-    delete_old_custom_formats: true
-    include:
-      - template: sonarr-quality-definition-series
-      - template: sonarr-v4-quality-profile-web-1080p
-      - template: sonarr-v4-custom-formats-web-1080p
-radarr:
-  movies:
-    base_url: !secret movies_base_url
-    api_key: !secret movies_api_key
-    delete_old_custom_formats: true
-    include:
-      - template: radarr-quality-definition-movie
-      - template: radarr-quality-profile-hd-bluray-web
-      - template: radarr-custom-formats-hd-bluray-web
-EOF
+    # Recyclarr v8 auto-loads configs/<template>.yml. Generate the TRaSH starter
+    # templates (Radarr HD Bluray + WEB, Sonarr WEB-1080p) and inject our
+    # connection details through the secrets file. Profilarr stays available for
+    # GUI customization on top of this baseline.
+    info "Generating TRaSH Guides configs via Recyclarr templates"
+    rm -f "${config_dir}/recyclarr.yml"
+    rm -f "${config_dir}/configs/"*.yml 2>/dev/null || true
+    docker exec recyclarr recyclarr config create --template hd-bluray-web --force >/dev/null 2>&1 || true
+    docker exec recyclarr recyclarr config create --template web-1080p --force >/dev/null 2>&1 || true
+    if [[ -f "${config_dir}/configs/hd-bluray-web.yml" && -f "${config_dir}/configs/web-1080p.yml" ]]; then
+      sed -i -e 's|base_url: Put your Radarr URL here|base_url: !secret movies_base_url|' \
+             -e 's|api_key: Put your API key here|api_key: !secret movies_api_key|' \
+             "${config_dir}/configs/hd-bluray-web.yml"
+      sed -i -e 's|base_url: Put your Sonarr URL here|base_url: !secret series_base_url|' \
+             -e 's|api_key: Put your API key here|api_key: !secret series_api_key|' \
+             "${config_dir}/configs/web-1080p.yml"
+      chown -R "$(env_value PUID 65534):$(env_value PGID 65534)" "$config_dir"
+      chmod 0600 "${config_dir}/secrets.yml" "${config_dir}/configs/"*.yml
+      info "Applying TRaSH Guides quality profiles and custom formats via Recyclarr"
+      if docker exec recyclarr recyclarr sync >/dev/null 2>&1; then
+        info "Recyclarr applied TRaSH profiles: Radarr 'HD Bluray + WEB' and Sonarr 'WEB-1080p'"
+      else
+        warn "Recyclarr sync did not finish cleanly; TRaSH profiles may be partial. Re-run later with: docker exec recyclarr recyclarr sync"
+      fi
+    else
+      warn "Recyclarr could not generate TRaSH template configs; skipping profile sync. Set them up in Profilarr (:6868)."
+      chown -R "$(env_value PUID 65534):$(env_value PGID 65534)" "$config_dir"
+      chmod 0600 "${config_dir}/secrets.yml"
+    fi
   else
     cat >"${config_dir}/recyclarr.yml" <<'EOF'
 sonarr:
@@ -398,19 +404,9 @@ radarr:
     base_url: !secret movies_base_url
     api_key: !secret movies_api_key
 EOF
-  fi
-
-  chown -R "$(env_value PUID 65534):$(env_value PGID 65534)" "$config_dir"
-  chmod 0600 "${config_dir}/secrets.yml" "${config_dir}/recyclarr.yml"
-  docker exec recyclarr recyclarr config list local >/dev/null 2>&1 || warn "Recyclarr config was written but its local-file validation did not complete."
-
-  if [[ "$APPLY_TRASH" == "1" ]]; then
-    info "Applying TRaSH Guides quality profiles and custom formats via Recyclarr"
-    if docker exec recyclarr recyclarr sync >/dev/null 2>&1; then
-      info "Recyclarr applied TRaSH profiles: Sonarr WEB-1080p and Radarr HD Bluray + WEB"
-    else
-      warn "Recyclarr sync did not finish cleanly; TRaSH profiles may be partial. Re-run later with: docker exec recyclarr recyclarr sync"
-    fi
+    chown -R "$(env_value PUID 65534):$(env_value PGID 65534)" "$config_dir"
+    chmod 0600 "${config_dir}/secrets.yml" "${config_dir}/recyclarr.yml"
+    docker exec recyclarr recyclarr config list local >/dev/null 2>&1 || warn "Recyclarr config was written but its local-file validation did not complete."
   fi
 }
 
