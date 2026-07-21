@@ -5,6 +5,7 @@ IFS=$'\n\t'
 APP_DIR="${APP_DIR:-/opt/mediastack}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 QNAP_ENABLED="${QNAP_ENABLED:-0}"
+APPLY_TRASH="${APPLY_TRASH:-1}"
 
 info() { printf '\033[1;34m[configure]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[configure] WARN:\033[0m %s\n' "$*" >&2; }
@@ -361,7 +362,33 @@ series_api_key: ${sonarr_key}
 movies_base_url: http://radarr:7878
 movies_api_key: ${radarr_key}
 EOF
-  cat >"${config_dir}/recyclarr.yml" <<'EOF'
+
+  if [[ "$APPLY_TRASH" == "1" ]]; then
+    # Auto-apply a sane TRaSH Guides baseline through Recyclarr's bundled
+    # templates: Sonarr WEB-1080p and Radarr HD Bluray + WEB. Profilarr remains
+    # available for anyone who wants to customize further in the GUI.
+    cat >"${config_dir}/recyclarr.yml" <<'EOF'
+sonarr:
+  series:
+    base_url: !secret series_base_url
+    api_key: !secret series_api_key
+    delete_old_custom_formats: true
+    include:
+      - template: sonarr-quality-definition-series
+      - template: sonarr-v4-quality-profile-web-1080p
+      - template: sonarr-v4-custom-formats-web-1080p
+radarr:
+  movies:
+    base_url: !secret movies_base_url
+    api_key: !secret movies_api_key
+    delete_old_custom_formats: true
+    include:
+      - template: radarr-quality-definition-movie
+      - template: radarr-quality-profile-hd-bluray-web
+      - template: radarr-custom-formats-hd-bluray-web
+EOF
+  else
+    cat >"${config_dir}/recyclarr.yml" <<'EOF'
 sonarr:
   series:
     base_url: !secret series_base_url
@@ -371,9 +398,20 @@ radarr:
     base_url: !secret movies_base_url
     api_key: !secret movies_api_key
 EOF
+  fi
+
   chown -R "$(env_value PUID 65534):$(env_value PGID 65534)" "$config_dir"
   chmod 0600 "${config_dir}/secrets.yml" "${config_dir}/recyclarr.yml"
   docker exec recyclarr recyclarr config list local >/dev/null 2>&1 || warn "Recyclarr config was written but its local-file validation did not complete."
+
+  if [[ "$APPLY_TRASH" == "1" ]]; then
+    info "Applying TRaSH Guides quality profiles and custom formats via Recyclarr"
+    if docker exec recyclarr recyclarr sync >/dev/null 2>&1; then
+      info "Recyclarr applied TRaSH profiles: Sonarr WEB-1080p and Radarr HD Bluray + WEB"
+    else
+      warn "Recyclarr sync did not finish cleanly; TRaSH profiles may be partial. Re-run later with: docker exec recyclarr recyclarr sync"
+    fi
+  fi
 }
 
 profilarr_form_post() {
@@ -677,7 +715,7 @@ Automatic media-stack configuration completed.
 - Prowlarr syncs indexers to Sonarr, Radarr, and Lidarr.
 - Bazarr is connected to Sonarr and Radarr.
 - Jellyfin has Movies, TV Shows, Anime, Music, and Books libraries.
-- Recyclarr has connection-only configuration ready for chosen TRaSH profiles.
+- Recyclarr applied a TRaSH Guides baseline (Sonarr WEB-1080p, Radarr HD Bluray + WEB) when enabled; Profilarr provides the full TRaSH GUI for customization.
 - Profilarr provides the normal TRaSH Guides web UI and is preconnected to Sonarr/Radarr.
 - Portainer is initialized with the shared admin login.
 - Media Stack Home on port 8088 links every user-facing application.

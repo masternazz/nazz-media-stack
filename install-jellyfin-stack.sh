@@ -29,6 +29,7 @@ ENABLE_QNAP=0
 NVIDIA_MODE="auto"
 START_STACK=1
 AUTO_CONFIGURE=1
+APPLY_TRASH=1
 ENABLE_SUBTITLE_TIMER=1
 REPLACE=0
 DRY_RUN=0
@@ -90,6 +91,7 @@ Stack/env:
   --env-file FILE           Use an existing .env; missing stack secrets are generated
   --no-start                Install files but do not run docker compose up
   --no-auto-configure       Start containers without first-run app/NAS integration
+  --no-trash-profiles       Do not auto-apply TRaSH Guides quality profiles via Recyclarr
   --no-subtitle-repair-timer
                             Do not enable the safe weekly subtitle repair timer
   --root-password PASS      Set root password for the LXC
@@ -411,6 +413,7 @@ parse_args() {
       --env-file) ENV_FILE="$2"; shift 2 ;;
       --no-start) START_STACK=0; shift ;;
       --no-auto-configure) AUTO_CONFIGURE=0; shift ;;
+      --no-trash-profiles) APPLY_TRASH=0; shift ;;
       --no-subtitle-repair-timer) ENABLE_SUBTITLE_TIMER=0; shift ;;
       --root-password) ROOT_PASSWORD="$2"; shift 2 ;;
       --ssh-public-key-file) SSH_PUBLIC_KEY_FILE="$2"; shift 2 ;;
@@ -862,12 +865,12 @@ start_stack() {
 configure_stack() {
   if [[ "$AUTO_CONFIGURE" != "1" || "$START_STACK" != "1" || "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
     warn "Skipping automatic app integration. To run it later:"
-    warn "pct exec ${CTID} -- env APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' '${APP_DIR}/configure-media-stack.sh'"
+    warn "pct exec ${CTID} -- env APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' '${APP_DIR}/configure-media-stack.sh'"
     return
   fi
 
   info "Configuring NAS paths and connecting the media applications"
-  pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' '${APP_DIR}/configure-media-stack.sh'"
+  pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' '${APP_DIR}/configure-media-stack.sh'"
 }
 
 enable_subtitle_repair_timer() {

@@ -34,11 +34,14 @@ Everything is reachable from the **Media Stack Home** page at
 - Jellyfin libraries: Movies, TV Shows, Anime, Music, Books
 - Jellyseerr initialized against Jellyfin + Sonarr/Radarr
 - Profilarr pre-connected to Sonarr/Radarr with the TRaSH Guides database linked
+- **TRaSH Guides quality profiles + custom formats applied automatically** via
+  Recyclarr — Sonarr **WEB-1080p** and Radarr **HD Bluray + WEB**
 
-> **TRaSH quality profiles are not auto-applied.** Profilarr links the TRaSH
-> database and pre-connects your *arrs; you choose and sync the specific
-> profiles from the Profilarr UI (`:6868`). This is deliberate — it avoids
-> silently changing your quality decisions.
+> The TRaSH baseline is applied on install via Recyclarr's bundled templates.
+> Opt out with `--no-trash-profiles` if you'd rather choose everything yourself.
+> Either way, **Profilarr** (`:6868`) gives you the full TRaSH GUI to customize
+> or add more profiles afterward. Recyclarr also re-syncs daily to keep formats
+> current.
 
 ## Requirements
 
