@@ -1,0 +1,16 @@
+[Unit]
+Description=Repair media-stack subtitle mounts, permissions, and indexes
+After=docker.service network-online.target remote-fs.target
+Wants=docker.service network-online.target remote-fs.target
+
+[Service]
+Type=oneshot
+Environment=APP_DIR=/opt/mediastack
+Environment=QNAP_REQUIRED=1
+EnvironmentFile=-/etc/default/mediastack-subtitles
+ExecStart=/bin/bash -lc 'exec "$APP_DIR/fix-subtitles.sh"'
+TimeoutStartSec=4h
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

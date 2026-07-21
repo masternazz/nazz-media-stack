@@ -1,0 +1,302 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=${VPN_TYPE:-openvpn}
+      - OPENVPN_USER=${NORDVPN_USER}
+      - OPENVPN_PASSWORD=${NORDVPN_PASS}
+      - SERVER_COUNTRIES=${NORDVPN_COUNTRIES:-United States}
+      - TZ=${TZ}
+      - FIREWALL=${FIREWALL:-on}
+      - FIREWALL_OUTBOUND_SUBNETS=${FIREWALL_OUTBOUND_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8}
+      - FIREWALL_VPN_INPUT_PORTS=${FIREWALL_VPN_INPUT_PORTS:-6881}
+    ports:
+      - "8080:8080"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+      - TORRENTING_PORT=6881
+    volumes:
+      - ./config/qbittorrent:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - "9696:9696"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: unless-stopped
+
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    container_name: byparr
+    environment:
+      - TZ=${TZ}
+      - PORT=8191
+      - LOG_LEVEL=info
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/sonarr:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    ports:
+      - "8989:8989"
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/radarr:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    ports:
+      - "7878:7878"
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/lidarr:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    ports:
+      - "8686:8686"
+    restart: unless-stopped
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/bazarr:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    ports:
+      - "6767:6767"
+    restart: unless-stopped
+
+  kavita:
+    image: kizaing/kavita:latest
+    container_name: kavita
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./config/kavita:/kavita/config
+      - /mnt/nas/media/books:/books
+      - /mnt/nas/media/comics:/comics
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  mylar:
+    image: lscr.io/linuxserver/mylar3:latest
+    container_name: mylar
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/mylar:/config
+      - /mnt/nas:/data
+      - /mnt/qnap:/qnap
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - JELLYFIN_CACHE_DIR=/cache
+    volumes:
+      - ./config/jellyfin:/config
+      - /mnt/nas/media:/media
+      - /mnt/qnap/media:/qnap_media
+      - /mnt/nas/jellyfin-cache:/cache
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+
+  jellyseerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: jellyseerr
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./config/jellyseerr:/app/config
+    ports:
+      - "5055:5055"
+    restart: unless-stopped
+
+  wizarr:
+    image: ghcr.io/wizarrrr/wizarr:latest
+    container_name: wizarr
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./config/wizarr:/data/database
+    ports:
+      - "5690:5690"
+    restart: unless-stopped
+
+  jellystat-db:
+    image: postgres:15
+    container_name: jellystat-db
+    environment:
+      - POSTGRES_USER=jellystat
+      - POSTGRES_PASSWORD=${JELLYSTAT_DB_PASS}
+      - POSTGRES_DB=jfstat
+    volumes:
+      - ./config/jellystat/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jellystat -d jfstat"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  jellystat:
+    image: cyfershepard/jellystat:latest
+    container_name: jellystat
+    depends_on:
+      jellystat-db:
+        condition: service_healthy
+    environment:
+      - POSTGRES_USER=jellystat
+      - POSTGRES_PASSWORD=${JELLYSTAT_DB_PASS}
+      - POSTGRES_IP=jellystat-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=jfstat
+      - JWT_SECRET=${JELLYSTAT_JWT_SECRET}
+      - TZ=${TZ}
+    volumes:
+      - ./config/jellystat/backup-data:/app/backend/backup-data
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:8
+    container_name: recyclarr
+    user: "${PUID}:${PGID}"
+    environment:
+      - TZ=${TZ}
+      - RECYCLARR_SCHEDULE=@daily
+    volumes:
+      - ./config/recyclarr:/config
+    restart: unless-stopped
+
+  profilarr:
+    image: ghcr.io/dictionarry-hub/profilarr:latest
+    container_name: profilarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - HOME=/config
+      - DENO_DIR=/config/.cache/deno
+      - AUTH=on
+    volumes:
+      - ./config/profilarr:/config
+    ports:
+      - "6868:6868"
+    restart: unless-stopped
+
+  mediastack-home:
+    image: nginx:alpine
+    container_name: mediastack-home
+    volumes:
+      - ./portal:/usr/share/nginx/html:ro
+    ports:
+      - "8088:80"
+    restart: unless-stopped
+
+  homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    container_name: homarr
+    environment:
+      - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_ENCRYPTION_KEY:?HOMARR_SECRET_ENCRYPTION_KEY is required}
+      - DB_URL=/appdata/db/db.sqlite
+      - DB_DIALECT=sqlite
+      - DB_DRIVER=better-sqlite3
+      - AUTH_PROVIDERS=credentials
+      - REDIS_IS_EXTERNAL=false
+      - NODE_ENV=production
+    volumes:
+      - ./config/homarr:/appdata
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "7575:7575"
+    restart: unless-stopped
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    command: --no-setup-token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    ports:
+      - "8000:8000"
+      - "9443:9443"
+    restart: always
+
+volumes:
+  portainer_data:

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Stack Home</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #0d1b2d;
+      --panel-hover: #132843;
+      --text: #f4f7fb;
+      --muted: #9eb0c6;
+      --accent: #60a5fa;
+      --ok: #54d69a;
+      --line: #223752;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 0%, #12345c 0, transparent 34rem),
+        linear-gradient(145deg, var(--bg), #081522 58%, #07101b);
+    }
+    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 54px 0 72px; }
+    header { max-width: 760px; margin-bottom: 34px; }
+    .eyebrow { color: var(--ok); font-weight: 750; letter-spacing: .11em; text-transform: uppercase; font-size: .76rem; }
+    h1 { font-size: clamp(2.25rem, 7vw, 4.8rem); line-height: .98; margin: 10px 0 18px; letter-spacing: -.055em; }
+    h2 { font-size: 1rem; margin: 36px 0 14px; color: #dce8f7; }
+    p { color: var(--muted); line-height: 1.65; margin: 0; }
+    .notice {
+      margin-top: 24px;
+      border: 1px solid #2f5277;
+      background: rgba(13, 31, 53, .78);
+      border-radius: 16px;
+      padding: 17px 19px;
+    }
+    .notice strong { color: var(--text); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 13px; }
+    a.card {
+      display: block;
+      min-height: 146px;
+      padding: 20px;
+      color: inherit;
+      text-decoration: none;
+      background: linear-gradient(145deg, rgba(17, 35, 58, .96), rgba(11, 26, 44, .96));
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    a.card:hover { transform: translateY(-3px); border-color: var(--accent); background: var(--panel-hover); }
+    .card .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .card strong { font-size: 1.05rem; }
+    .arrow { color: var(--accent); font-size: 1.25rem; }
+    .card p { margin-top: 15px; font-size: .9rem; }
+    .tag { display: inline-block; margin-top: 13px; color: var(--ok); font-size: .74rem; font-weight: 700; }
+    .advanced { opacity: .86; }
+    footer { color: #7990aa; font-size: .82rem; margin-top: 36px; line-height: 1.6; }
+    code { color: #c9e4ff; background: #0a1727; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Your self-hosted media stack</div>
+    <h1>Everything starts here.</h1>
+    <p>Use this page instead of remembering ports or setting up services from the command line. The installer already connects storage, downloads, indexers, subtitles, requests, and the core media libraries.</p>
+    <div class="notice"><strong>Shared login:</strong> use the admin username and password you chose during installation for Jellyfin, qBittorrent, Profilarr, and Portainer. Optional apps may ask for their own account the first time you open them.</div>
+  </header>
+
+  <h2>Start here</h2>
+  <section class="grid">
+    <a class="card" data-port="5055"><div class="top"><strong>Seerr</strong><span class="arrow">&#8599;</span></div><p>Request movies and shows. Sonarr, Radarr, and Jellyfin are already connected.</p><span class="tag">Requests</span></a>
+    <a class="card" data-port="8096"><div class="top"><strong>Jellyfin</strong><span class="arrow">&#8599;</span></div><p>Watch your Movies, TV, Anime, Music, and Books libraries from the mounted NAS.</p><span class="tag">Watch</span></a>
+    <a class="card" data-port="6868"><div class="top"><strong>Profilarr</strong><span class="arrow">&#8599;</span></div><p>Choose and sync TRaSH Guides quality profiles through a web interface.</p><span class="tag">TRaSH GUI</span></a>
+    <a class="card" data-port="7575"><div class="top"><strong>Homarr</strong><span class="arrow">&#8599;</span></div><p>Build a personalized dashboard when you want more than this ready-made home page.</p><span class="tag">Dashboard</span></a>
+  </section>
+
+  <h2>Media automation</h2>
+  <section class="grid">
+    <a class="card" data-port="8989"><div class="top"><strong>Sonarr</strong><span class="arrow">&#8599;</span></div><p>TV and anime automation with NAS roots, qBittorrent, and Prowlarr preconnected.</p></a>
+    <a class="card" data-port="7878"><div class="top"><strong>Radarr</strong><span class="arrow">&#8599;</span></div><p>Movie automation with its NAS root, downloader, indexer manager, and Seerr preconnected.</p></a>
+    <a class="card" data-port="8686"><div class="top"><strong>Lidarr</strong><span class="arrow">&#8599;</span></div><p>Music automation using the same mounted-media and download layout.</p></a>
+    <a class="card" data-port="9696"><div class="top"><strong>Prowlarr</strong><span class="arrow">&#8599;</span></div><p>Manage indexers once; changes sync to Sonarr, Radarr, and Lidarr.</p></a>
+    <a class="card" data-port="8080"><div class="top"><strong>qBittorrent</strong><span class="arrow">&#8599;</span></div><p>Downloads through Gluetun, already split into Movies, TV, Anime, Music, Books, and Comics.</p></a>
+    <a class="card" data-port="6767"><div class="top"><strong>Bazarr</strong><span class="arrow">&#8599;</span></div><p>Subtitle automation, already connected to Sonarr and Radarr.</p></a>
+  </section>
+
+  <h2>Books, invites, and statistics</h2>
+  <section class="grid">
+    <a class="card" data-port="5000"><div class="top"><strong>Kavita</strong><span class="arrow">&#8599;</span></div><p>Read books and comics from the mounted NAS. Create its local admin on first open.</p></a>
+    <a class="card" data-port="8090"><div class="top"><strong>Mylar3</strong><span class="arrow">&#8599;</span></div><p>Comic management with the same NAS paths available inside the container.</p></a>
+    <a class="card" data-port="5690"><div class="top"><strong>Wizarr</strong><span class="arrow">&#8599;</span></div><p>Create invitations for your Jellyfin users through a guided web interface.</p></a>
+    <a class="card" data-port="3000"><div class="top"><strong>Jellystat</strong><span class="arrow">&#8599;</span></div><p>Jellyfin viewing statistics backed by its automatically managed database.</p></a>
+  </section>
+
+  <h2>Administration</h2>
+  <section class="grid advanced">
+    <a class="card" data-port="9443" data-scheme="https"><div class="top"><strong>Portainer</strong><span class="arrow">&#8599;</span></div><p>Manage containers in a GUI. Your browser may warn about its local self-signed certificate.</p></a>
+    <a class="card" data-port="8191"><div class="top"><strong>Byparr</strong><span class="arrow">&#8599;</span></div><p>Anti-bot helper used by compatible indexer setups. Most users do not need to touch it.</p></a>
+  </section>
+
+  <footer>Gluetun, PostgreSQL, and Recyclarr are backend services and intentionally have no dashboard card. They run automatically. Advanced Recyclarr files remain under <code>/opt/mediastack/config/recyclarr</code>, while Profilarr is the normal web-based TRaSH workflow.</footer>
+</main>
+<script>
+  const host = window.location.hostname;
+  document.querySelectorAll('[data-port]').forEach((card) => {
+    const scheme = card.dataset.scheme || 'http';
+    card.href = `${scheme}://${host}:${card.dataset.port}`;
+  });
+</script>
+</body>
+</html>

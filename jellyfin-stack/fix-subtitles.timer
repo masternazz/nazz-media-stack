@@ -1,0 +1,12 @@
+[Unit]
+Description=Run media-stack subtitle repair after boot and weekly
+
+[Timer]
+OnBootSec=15min
+OnCalendar=Sun *-*-* 04:10:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=fix-subtitles.service
+
+[Install]
+WantedBy=timers.target

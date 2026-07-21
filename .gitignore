@@ -1,0 +1,17 @@
+# Secrets and runtime state — never commit these
+.env
+.env.local
+*.env.local
+jellyfin-stack/.env
+jellyfin-stack/config/
+**/config/
+*.api-key
+.*-api-key
+.compose-command
+INSTALL-RESULTS.txt
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.log
