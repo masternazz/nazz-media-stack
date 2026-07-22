@@ -53,9 +53,20 @@ Everything is reachable from the **Media Stack Home** page at
 
 ## Quick start
 
+Run this on the Proxmox host as root:
+
 ```bash
-git clone https://github.com/<your-user>/jellyfin-media-stack.git
-cd jellyfin-media-stack
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
+```
+
+> Requires the repository to be public. If it is private, either export a
+> `GITHUB_TOKEN` that can read it, or use the clone method below.
+
+Or clone and run:
+
+```bash
+git clone https://github.com/masternazz/nazz-media-stack.git
+cd nazz-media-stack
 sudo ./install-jellyfin-stack.sh
 ```
 
