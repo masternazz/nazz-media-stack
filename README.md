@@ -47,7 +47,8 @@ Everything is reachable from the **Media Stack Home** page at
 
 - A **Proxmox VE** host (run the installer on the host, as root)
 - An **NFS export** for media (required). A second NFS export (e.g. a QNAP) is optional.
-- Optional: an NVIDIA GPU on the host for hardware transcoding
+- Optional: an **NVIDIA** (NVENC/CUDA) or **AMD** (VAAPI) GPU on the host for
+  hardware transcoding — auto-detected, NVIDIA preferred when both are present
 - A VPN account for Gluetun (defaults assume NordVPN; edit `docker-compose.yml`
   and the `.env` for other providers)
 
@@ -109,7 +110,7 @@ Every default can be overridden by a flag or environment variable. Key ones:
 | Second NAS (optional) | `--enable-qnap` / `--qnap-export` | disabled |
 | Container DNS | `--nameserver` | `1.1.1.1` |
 | VLAN tag | `--vlan` | `6` |
-| GPU passthrough | `--no-nvidia` / `--require-nvidia` | auto-detect |
+| GPU passthrough | `--gpu auto\|nvidia\|amd\|off` | auto-detect |
 
 Copy `jellyfin-stack/.env.example` to `.env` and fill it in to pin secrets, or
 let the installer generate strong random secrets for you (stored at

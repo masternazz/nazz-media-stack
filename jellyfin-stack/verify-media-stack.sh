@@ -207,6 +207,11 @@ verify_backends() {
   if [[ -e /dev/nvidia0 ]]; then
     hwaccels="$(docker exec jellyfin /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -hwaccels 2>/dev/null)"
     grep -qi cuda <<<"$hwaccels" || die "Jellyfin FFmpeg does not expose CUDA."
+  elif [[ -e /dev/dri/renderD128 ]]; then
+    hwaccels="$(docker exec jellyfin /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -hwaccels 2>/dev/null)"
+    grep -qi vaapi <<<"$hwaccels" || die "Jellyfin FFmpeg does not expose VAAPI."
+    docker exec jellyfin test -r /dev/dri/renderD128 ||
+      die "Jellyfin cannot read /dev/dri/renderD128; check RENDER_GID/VIDEO_GID in the .env."
   fi
   info "Portainer, Recyclarr, and available GPU backend checks pass"
 }

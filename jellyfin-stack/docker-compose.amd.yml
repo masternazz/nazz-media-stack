@@ -1,0 +1,13 @@
+services:
+  jellyfin:
+    environment:
+      # radeonsi covers GCN and newer AMD cards. Override in .env if your card
+      # needs a different VA driver (e.g. r600 for very old hardware).
+      - LIBVA_DRIVER_NAME=${LIBVA_DRIVER_NAME:-radeonsi}
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      # Jellyfin runs as PUID/PGID, so it must join the host render/video groups
+      # to open /dev/dri/renderD128. The installer detects these GIDs.
+      - "${RENDER_GID:-104}"
+      - "${VIDEO_GID:-44}"

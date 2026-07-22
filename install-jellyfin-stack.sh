@@ -26,7 +26,8 @@ NAS_EXPORT="${NAS_EXPORT:-nas.example.lan:/volume1/media}"
 HOST_QNAP="${HOST_QNAP:-/mnt/qnap_media}"
 QNAP_EXPORT="${QNAP_EXPORT:-nas.example.lan:/share/media}"
 ENABLE_QNAP=0
-NVIDIA_MODE="auto"
+GPU_MODE="auto"
+GPU_REQUIRE=0
 START_STACK=1
 AUTO_CONFIGURE=1
 APPLY_TRASH=1
@@ -42,6 +43,7 @@ MEDIASTACK_ADMIN_PASSWORD="${MEDIASTACK_ADMIN_PASSWORD:-}"
 
 COMPOSE_SRC="${STACK_ASSET_DIR}/docker-compose.yml"
 NVIDIA_COMPOSE_SRC="${STACK_ASSET_DIR}/docker-compose.nvidia.yml"
+AMD_COMPOSE_SRC="${STACK_ASSET_DIR}/docker-compose.amd.yml"
 ENV_EXAMPLE_SRC="${STACK_ASSET_DIR}/.env.example"
 CONFIGURE_SRC="${STACK_ASSET_DIR}/configure-media-stack.sh"
 VERIFY_SRC="${STACK_ASSET_DIR}/verify-media-stack.sh"
@@ -50,6 +52,7 @@ FIX_SUBTITLES_SERVICE_SRC="${STACK_ASSET_DIR}/fix-subtitles.service"
 FIX_SUBTITLES_TIMER_SRC="${STACK_ASSET_DIR}/fix-subtitles.timer"
 PORTAL_SRC="${STACK_ASSET_DIR}/portal/index.html"
 NVIDIA_ACTIVE=0
+AMD_ACTIVE=0
 ENV_HAS_PLACEHOLDER=0
 RESOLVED_TEMPLATE_REF=""
 
@@ -84,8 +87,11 @@ Storage:
   --host-qnap PATH          Host QNAP mount path (default: /mnt/qnap_media)
 
 GPU:
-  --no-nvidia               Do not configure NVIDIA passthrough
-  --require-nvidia          Fail if NVIDIA devices are not present on the Proxmox host
+  --gpu VENDOR              GPU passthrough: auto, nvidia, amd, or off (default: auto)
+  --no-gpu                  Do not configure any GPU passthrough (CPU-only Jellyfin)
+  --require-nvidia          Use NVIDIA and fail if it is not present on the Proxmox host
+  --require-amd             Use AMD (VAAPI) and fail if it is not present on the Proxmox host
+  --no-nvidia               Deprecated alias for --no-gpu
 
 Stack/env:
   --env-file FILE           Use an existing .env; missing stack secrets are generated
@@ -268,13 +274,14 @@ ui_yesno() {
   [[ "$answer" =~ ^[Yy] ]]
 }
 
-ui_nvidia_menu() {
+ui_gpu_menu() {
   local value=""
 
   if use_whiptail; then
-    if ! value="$(whiptail --title "GPU Passthrough" --menu "Choose Jellyfin NVIDIA passthrough mode." 14 78 4 \
-      auto "Use NVIDIA if devices exist" \
-      require "Fail if NVIDIA is missing" \
+    if ! value="$(whiptail --title "GPU Passthrough" --menu "Choose Jellyfin hardware transcoding." 15 78 4 \
+      auto "Detect NVIDIA, then AMD, else CPU-only" \
+      nvidia "NVIDIA (NVENC/CUDA)" \
+      amd "AMD (VAAPI)" \
       off "CPU-only Jellyfin" \
       3>&1 1>&2 2>&3)"; then
       die "Setup cancelled."
@@ -283,10 +290,10 @@ ui_nvidia_menu() {
     return
   fi
 
-  value="$(ui_input "GPU Passthrough" "NVIDIA mode: auto, require, or off" "$NVIDIA_MODE")"
+  value="$(ui_input "GPU Passthrough" "GPU mode: auto, nvidia, amd, or off" "$GPU_MODE")"
   case "$value" in
-    auto|require|off) printf '%s\n' "$value" ;;
-    *) warn "Unknown NVIDIA mode '${value}', using auto."; printf 'auto\n' ;;
+    auto|nvidia|amd|off) printf '%s\n' "$value" ;;
+    *) warn "Unknown GPU mode '${value}', using auto."; printf 'auto\n' ;;
   esac
 }
 
@@ -340,7 +347,7 @@ run_setup_ui() {
     ENABLE_QNAP=0
   fi
 
-  NVIDIA_MODE="$(ui_nvidia_menu)"
+  GPU_MODE="$(ui_gpu_menu)"
 
   if ui_yesno "Start Stack" "Pull images and start Docker Compose after install?" "yes"; then
     START_STACK=1
@@ -378,7 +385,7 @@ CPU/RAM/Swap: ${CORES} cores, ${MEMORY_MB} MB RAM, ${SWAP_MB} MB swap
 Network: ${BRIDGE}, VLAN ${VLAN_TAG}, ip=${IP_CONFIG}, DNS ${NAMESERVER}
 Synology: ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas
 QNAP: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
-NVIDIA: ${NVIDIA_MODE}
+GPU: ${GPU_MODE}
 Start stack: $([[ "$START_STACK" == "1" ]] && printf 'yes' || printf 'no')
 Auto-configure apps/NAS: $([[ "$AUTO_CONFIGURE" == "1" ]] && printf 'yes' || printf 'no')
 Shared admin user: ${MEDIASTACK_ADMIN_USER}
@@ -408,8 +415,16 @@ parse_args() {
       --enable-qnap) ENABLE_QNAP=1; shift ;;
       --qnap-export) QNAP_EXPORT="$2"; shift 2 ;;
       --host-qnap) HOST_QNAP="$2"; shift 2 ;;
-      --no-nvidia) NVIDIA_MODE="off"; shift ;;
-      --require-nvidia) NVIDIA_MODE="require"; shift ;;
+      --gpu)
+        case "$2" in
+          auto|nvidia|amd|off) GPU_MODE="$2" ;;
+          *) die "Invalid --gpu value: $2. Use auto, nvidia, amd, or off." ;;
+        esac
+        shift 2
+        ;;
+      --no-gpu|--no-nvidia) GPU_MODE="off"; shift ;;
+      --require-nvidia) GPU_MODE="nvidia"; GPU_REQUIRE=1; shift ;;
+      --require-amd) GPU_MODE="amd"; GPU_REQUIRE=1; shift ;;
       --env-file) ENV_FILE="$2"; shift 2 ;;
       --no-start) START_STACK=0; shift ;;
       --no-auto-configure) AUTO_CONFIGURE=0; shift ;;
@@ -433,6 +448,7 @@ preflight() {
   command -v pveam >/dev/null 2>&1 || die "pveam not found. This needs to run on Proxmox VE."
   [[ -f "$COMPOSE_SRC" ]] || die "Missing $COMPOSE_SRC"
   [[ -f "$NVIDIA_COMPOSE_SRC" ]] || die "Missing $NVIDIA_COMPOSE_SRC"
+  [[ -f "$AMD_COMPOSE_SRC" ]] || die "Missing $AMD_COMPOSE_SRC"
   [[ -f "$ENV_EXAMPLE_SRC" ]] || die "Missing $ENV_EXAMPLE_SRC"
   [[ -f "$CONFIGURE_SRC" ]] || die "Missing $CONFIGURE_SRC"
   [[ -f "$VERIFY_SRC" ]] || die "Missing $VERIFY_SRC"
@@ -538,16 +554,69 @@ create_container() {
   run pct set "$CTID" --tags "media;docker;jellyfin"
 }
 
+has_nvidia_gpu() {
+  local device=""
+  for device in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+    [[ -e "$device" ]] || return 1
+  done
+  command -v nvidia-smi >/dev/null 2>&1
+}
+
+# AMD/ATI PCI vendor id is 0x1002. A render node alone is not enough, because
+# Intel iGPUs and NVIDIA also publish /dev/dri nodes.
+has_amd_gpu() {
+  local vendor_file=""
+  [[ -e /dev/dri/renderD128 ]] || return 1
+  for vendor_file in /sys/class/drm/card*/device/vendor; do
+    [[ -r "$vendor_file" ]] || continue
+    [[ "$(cat "$vendor_file")" == "0x1002" ]] && return 0
+  done
+  return 1
+}
+
 configure_lxc_devices() {
   info "Adding /dev/net/tun passthrough for Gluetun"
   append_lxc_config "lxc.cgroup2.devices.allow: c 10:200 rwm"
   append_lxc_config "lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file"
 
-  if [[ "$NVIDIA_MODE" == "off" ]]; then
-    info "NVIDIA passthrough disabled"
+  if [[ "$GPU_MODE" == "off" ]]; then
+    info "GPU passthrough disabled"
     return
   fi
 
+  local vendor="$GPU_MODE"
+  if [[ "$vendor" == "auto" ]]; then
+    if has_nvidia_gpu; then
+      vendor="nvidia"
+    elif has_amd_gpu; then
+      vendor="amd"
+    else
+      info "No NVIDIA or AMD GPU detected on the Proxmox host; deploying CPU-only Jellyfin."
+      return
+    fi
+  fi
+
+  case "$vendor" in
+    nvidia) configure_nvidia_passthrough ;;
+    amd) configure_amd_passthrough ;;
+  esac
+}
+
+configure_amd_passthrough() {
+  if ! has_amd_gpu; then
+    [[ "$GPU_REQUIRE" == "1" ]] && die "AMD passthrough required, but no AMD render device (/dev/dri/renderD128 with vendor 0x1002) was found on the Proxmox host."
+    warn "No AMD GPU detected on the Proxmox host; deploying CPU-only Jellyfin."
+    return
+  fi
+
+  info "Adding AMD GPU (VAAPI) passthrough"
+  AMD_ACTIVE=1
+  # 226 is the DRM char-device major (card* and renderD*).
+  append_lxc_config "lxc.cgroup2.devices.allow: c 226:* rwm"
+  append_lxc_config "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+}
+
+configure_nvidia_passthrough() {
   local required_devices=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools)
   local missing_devices=()
   local device=""
@@ -556,13 +625,13 @@ configure_lxc_devices() {
   done
 
   if (( ${#missing_devices[@]} > 0 )); then
-    [[ "$NVIDIA_MODE" == "require" ]] && die "NVIDIA passthrough required, but these devices are missing: ${missing_devices[*]}"
+    [[ "$GPU_REQUIRE" == "1" ]] && die "NVIDIA passthrough required, but these devices are missing: ${missing_devices[*]}"
     warn "Required NVIDIA devices are missing (${missing_devices[*]}); deploying CPU-only Jellyfin."
     return
   fi
 
   if ! command -v nvidia-smi >/dev/null 2>&1; then
-    [[ "$NVIDIA_MODE" == "require" ]] && die "NVIDIA passthrough required, but nvidia-smi is not installed on the Proxmox host."
+    [[ "$GPU_REQUIRE" == "1" ]] && die "NVIDIA passthrough required, but nvidia-smi is not installed on the Proxmox host."
     warn "nvidia-smi is not installed on the Proxmox host; deploying CPU-only Jellyfin."
     return
   fi
@@ -621,6 +690,30 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 '
+}
+
+install_amd_userspace() {
+  [[ "$AMD_ACTIVE" == "1" ]] || return 0
+
+  info "Installing AMD VAAPI userspace in CT${CTID}"
+  # Unlike NVIDIA, AMD needs no host-matched proprietary driver: the open Mesa
+  # stack in the container talks to the kernel amdgpu driver through /dev/dri.
+  # These packages give us vainfo for verification and a working VA driver.
+  if ! pct_bash '
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+apt-get update
+apt-get install -y --no-install-recommends mesa-va-drivers libva2 vainfo
+'; then
+    warn "AMD VAAPI userspace install did not complete; Jellyfin may still transcode using the drivers bundled in its image."
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "0" ]]; then
+    pct exec "$CTID" -- vainfo --display drm --device /dev/dri/renderD128 >/dev/null 2>&1 ||
+      warn "vainfo could not query /dev/dri/renderD128 inside the LXC; check that the host exposes an AMD render node."
+  fi
 }
 
 install_nvidia_userspace() {
@@ -728,6 +821,7 @@ push_stack_files() {
   pct_bash "mkdir -p '${APP_DIR}/portal'"
   run pct push "$CTID" "$COMPOSE_SRC" "${APP_DIR}/docker-compose.yml" --perms 0644
   run pct push "$CTID" "$NVIDIA_COMPOSE_SRC" "${APP_DIR}/docker-compose.nvidia.yml" --perms 0644
+  run pct push "$CTID" "$AMD_COMPOSE_SRC" "${APP_DIR}/docker-compose.amd.yml" --perms 0644
   run pct push "$CTID" "$ENV_EXAMPLE_SRC" "${APP_DIR}/.env.example" --perms 0644
   run pct push "$CTID" "$CONFIGURE_SRC" "${APP_DIR}/configure-media-stack.sh" --perms 0755
   run pct push "$CTID" "$VERIFY_SRC" "${APP_DIR}/verify-media-stack.sh" --perms 0755
@@ -818,6 +912,19 @@ EOF
   ensure_env_entry "$tmp_env" PORTAINER_ADMIN_USER "${PORTAINER_ADMIN_USER:-${shared_admin_user}}"
   ensure_env_entry "$tmp_env" PORTAINER_ADMIN_PASSWORD "${PORTAINER_ADMIN_PASSWORD:-${shared_admin_password}}"
 
+  if [[ "$AMD_ACTIVE" == "1" ]]; then
+    # Jellyfin runs as PUID/PGID and must join the LXC's render/video groups to
+    # open /dev/dri/renderD128, so resolve the real GIDs inside the container.
+    local render_gid="" video_gid=""
+    if [[ "$DRY_RUN" == "0" ]]; then
+      render_gid="$(pct exec "$CTID" -- getent group render 2>/dev/null | awk -F: '{print $3}' | head -n 1 || true)"
+      video_gid="$(pct exec "$CTID" -- getent group video 2>/dev/null | awk -F: '{print $3}' | head -n 1 || true)"
+    fi
+    ensure_env_entry "$tmp_env" RENDER_GID "${render_gid:-104}"
+    ensure_env_entry "$tmp_env" VIDEO_GID "${video_gid:-44}"
+    ensure_env_entry "$tmp_env" LIBVA_DRIVER_NAME "${LIBVA_DRIVER_NAME:-radeonsi}"
+  fi
+
   local firewall_vpn_input_ports
   firewall_vpn_input_ports="$(awk -F= '/^FIREWALL_VPN_INPUT_PORTS=/{value=substr($0,index($0,"=")+1)} END{print value}' "$tmp_env")"
   if [[ ! "$firewall_vpn_input_ports" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
@@ -842,6 +949,8 @@ EOF
 compose_command() {
   if [[ "$NVIDIA_ACTIVE" == "1" ]]; then
     printf 'docker compose -f docker-compose.yml -f docker-compose.nvidia.yml'
+  elif [[ "$AMD_ACTIVE" == "1" ]]; then
+    printf 'docker compose -f docker-compose.yml -f docker-compose.amd.yml'
   else
     printf 'docker compose -f docker-compose.yml'
   fi
@@ -893,6 +1002,9 @@ verify_stack() {
   if [[ "$NVIDIA_ACTIVE" == "1" ]]; then
     pct_bash "nvidia-smi || true"
   fi
+  if [[ "$AMD_ACTIVE" == "1" ]]; then
+    pct_bash "vainfo --display drm --device /dev/dri/renderD128 2>&1 | head -n 20 || true"
+  fi
 
   if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" ]]; then
     pct_bash "cd '${APP_DIR}' && \$(cat '${APP_DIR}/.compose-command') ps"
@@ -932,6 +1044,7 @@ main() {
   start_container
   install_docker
   install_nvidia_userspace
+  install_amd_userspace
   push_stack_files
   write_env_file
   create_media_dirs
