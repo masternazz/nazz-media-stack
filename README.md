@@ -56,11 +56,14 @@ Everything is reachable from the **Media Stack Home** page at
 Run this on the Proxmox host as root:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
+bash -c "$(curl -fsSL https://cloud.masternazz.com/s/ddfie8QwGyZp9Hi/download)"
 ```
 
-> Requires the repository to be public. If it is private, either export a
-> `GITHUB_TOKEN` that can read it, or use the clone method below.
+That bootstrap downloads a SHA-256-pinned bundle, verifies it, and runs the
+installer. No authentication needed — this is the recommended path.
+
+<!-- This repository is private. If it is ever made public, rotate or remove the
+     hosted link above, since it would become publicly visible here. -->
 
 Or clone and run:
 
@@ -68,6 +71,16 @@ Or clone and run:
 git clone https://github.com/masternazz/nazz-media-stack.git
 cd nazz-media-stack
 sudo ./install-jellyfin-stack.sh
+```
+
+A GitHub-hosted bootstrap (`install.sh`) is also included, but
+`raw.githubusercontent.com` only serves it while this repository is private if
+you supply a token that can read it:
+
+```bash
+export GITHUB_TOKEN=...
+bash -c "$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
 ```
 
 Running with no flags launches a guided terminal UI (whiptail) that prompts for
