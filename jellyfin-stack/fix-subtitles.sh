@@ -35,7 +35,7 @@ usage() {
 Usage: fix-subtitles.sh [options]
 
 Run this as root inside the media-stack LXC. It refuses to operate on an
-underlying local directory when a required NFS mount is absent.
+underlying directory when a required media mount is absent.
 
 Options:
   --dry-run                 Inspect and print changes without applying them
@@ -132,22 +132,24 @@ install_timer() {
   info "Installed and enabled fix-subtitles.timer"
 }
 
-verify_nfs_mount() {
-  local path="$1" label="$2" target="" fstype="" source="" records="" selected="" nearest=""
+verify_storage_mount() {
+  local path="$1" label="$2" required_type="${3:-any}"
+  local target="" fstype="" source="" records="" selected="" nearest=""
   [[ -d "$path" ]] || die "${label} path is missing: ${path}"
   records="$(timeout 10 findmnt -rn -T "$path" -o TARGET,FSTYPE,SOURCE || true)"
   [[ -n "$records" ]] || \
     die "Could not inspect ${label} mount at ${path}."
-  selected="$(awk -v path="$path" '$1 == path && ($2 == "nfs" || $2 == "nfs4") { record = $0 } END { print record }' <<<"$records")"
+  selected="$(awk -v path="$path" '$1 == path { record = $0 } END { print record }' <<<"$records")"
   nearest="$(awk 'NF { record = $0 } END { print record }' <<<"$records")"
   if [[ -z "$selected" ]]; then
     IFS=' ' read -r target fstype source <<<"$nearest"
-    [[ "$target" == "$path" ]] || \
-      die "${path} is not a mount point; refusing to use its underlying directory (nearest mount: ${target:-unknown})."
-    die "${path} is ${fstype:-unknown}, not NFS; refusing to use its underlying directory."
+    die "${path} is not a mount point; refusing to use its underlying directory (nearest mount: ${target:-unknown})."
   fi
   IFS=' ' read -r target fstype source <<<"$selected"
-  timeout 10 stat -L -- "$path" >/dev/null || die "${label} NFS mount is present but unresponsive: ${path}"
+  if [[ "$required_type" == "nfs" && "$fstype" != "nfs" && "$fstype" != "nfs4" ]]; then
+    die "${path} is ${fstype:-unknown}, not NFS; refusing to use it for ${label}."
+  fi
+  timeout 10 stat -L -- "$path" >/dev/null || die "${label} mount is present but unresponsive: ${path}"
   info "${label} is an active ${fstype} mount (${source})"
 }
 
@@ -746,9 +748,9 @@ main() {
     [[ "$TIMER_ONLY" == "1" ]] && return
   fi
 
-  verify_nfs_mount /mnt/nas "Synology NAS"
+  verify_storage_mount /mnt/nas "Primary media storage"
   if [[ "$QNAP_REQUIRED" == "1" ]]; then
-    verify_nfs_mount /mnt/qnap "QNAP"
+    verify_storage_mount /mnt/qnap "QNAP" nfs
   else
     warn "QNAP checks are disabled intentionally; no repair will touch /mnt/qnap."
   fi
@@ -780,4 +782,6 @@ main() {
   info "Subtitle repair completed safely"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

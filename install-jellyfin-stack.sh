@@ -21,6 +21,9 @@ NAMESERVER="${NAMESERVER:-}"
 TIMEZONE="${TZ:-auto}"
 APP_DIR="${APP_DIR:-/opt/mediastack}"
 
+PRIMARY_STORAGE_MODE="${PRIMARY_STORAGE_MODE:-nfs}"
+LOCAL_MEDIA_STORAGE="${LOCAL_MEDIA_STORAGE:-auto}"
+LOCAL_MEDIA_SIZE_GB="${LOCAL_MEDIA_SIZE_GB:-100}"
 HOST_NAS="${HOST_NAS:-/mnt/jellyfin-media}"
 NAS_EXPORT="${NAS_EXPORT:-}"
 HOST_QNAP="${HOST_QNAP:-/mnt/jellyfin-media-secondary}"
@@ -90,7 +93,10 @@ Core options:
   --timezone ZONE           Container timezone (default: Proxmox host timezone)
 
 Storage:
-  --nas-export EXPORT       Required NFS export; there is no environment-specific default
+  --media-storage MODE      Primary media storage: nfs or local (default: nfs)
+  --local-media-storage ID  Proxmox storage for an onboard media disk (default: most free)
+  --local-media-size GB     Onboard media disk size in GB (default: 100)
+  --nas-export EXPORT       Primary NFS export when --media-storage nfs is used
   --host-nas PATH           Host mount path passed to LXC /mnt/nas (default: /mnt/jellyfin-media)
   --enable-qnap             Mount QNAP export and pass to LXC /mnt/qnap
   --qnap-export EXPORT      Required when --enable-qnap is used
@@ -106,7 +112,7 @@ GPU:
 Stack/env:
   --env-file FILE           Use an existing .env; missing stack secrets are generated
   --no-start                Install files but do not run docker compose up
-  --no-auto-configure       Start containers without first-run app/NAS integration
+  --no-auto-configure       Start containers without first-run app/media integration
   --no-trash-profiles       Do not auto-apply TRaSH Guides quality profiles via Recyclarr
   --no-subtitle-repair-timer
                             Do not enable the safe weekly subtitle repair timer
@@ -542,6 +548,50 @@ ui_confirm() {
   ui_yesno "Ready To Install" "Continue with these settings?" "yes" || die "Setup cancelled."
 }
 
+ui_primary_storage_menu() {
+  local value=""
+
+  if use_whiptail; then
+    if ! value="$(whiptail --backtitle "$UI_BACKTITLE" --title "Primary Media Storage" \
+      --default-item "$PRIMARY_STORAGE_MODE" \
+      --menu "Choose where Jellyfin media and downloads will be stored." 15 82 2 \
+      nfs "NFS / NAS export (existing network storage)" \
+      local "Onboard Proxmox storage (managed LXC media disk)" \
+      3>&1 1>&2 2>&3)"; then
+      die "Setup cancelled."
+    fi
+    printf '%s\n' "$value"
+    return
+  fi
+
+  value="$(ui_input "Primary Media Storage" "Storage mode: nfs or local" "$PRIMARY_STORAGE_MODE")"
+  case "$value" in
+    nfs|local) printf '%s\n' "$value" ;;
+    *) warn "Unknown storage mode '${value}', using nfs."; printf 'nfs\n' ;;
+  esac
+}
+
+collect_primary_storage() {
+  local advanced="${1:-0}"
+  PRIMARY_STORAGE_MODE="$(ui_primary_storage_menu)"
+
+  case "$PRIMARY_STORAGE_MODE" in
+    local)
+      [[ "$LOCAL_MEDIA_STORAGE" == "auto" ]] &&
+        LOCAL_MEDIA_STORAGE="$(preferred_media_storage)"
+      LOCAL_MEDIA_STORAGE="$(ui_required_input "Onboard Storage" "Proxmox storage pool for the managed media disk" "$LOCAL_MEDIA_STORAGE")"
+      LOCAL_MEDIA_SIZE_GB="$(ui_required_input "Onboard Storage" "Media disk size in GB" "$LOCAL_MEDIA_SIZE_GB")"
+      NAS_EXPORT=""
+      ;;
+    nfs)
+      NAS_EXPORT="$(ui_required_input "Media Storage" "Primary NFS export (for example 192.168.1.10:/volume1/media)" "$NAS_EXPORT")"
+      if [[ "$advanced" == "1" ]]; then
+        HOST_NAS="$(ui_required_input "Media Storage" "Proxmox host mount path for the primary export" "$HOST_NAS")"
+      fi
+      ;;
+  esac
+}
+
 collect_secondary_nas() {
   local default_choice="no"
   [[ "$ENABLE_QNAP" == "1" ]] && default_choice="yes"
@@ -555,7 +605,7 @@ collect_secondary_nas() {
 }
 
 collect_default_settings() {
-  NAS_EXPORT="$(ui_required_input "Media Storage" "Primary NFS export (for example 192.168.1.10:/volume1/media)" "$NAS_EXPORT")"
+  collect_primary_storage 0
   collect_secondary_nas
   GPU_MODE="auto"
   START_STACK=1
@@ -581,8 +631,7 @@ collect_advanced_settings() {
   NAMESERVER="$(ui_input "DNS" "Nameserver (leave blank to inherit the Proxmox resolver)" "$NAMESERVER")"
   TIMEZONE="$(ui_required_input "Timezone" "Container timezone" "$TIMEZONE")"
   APP_DIR="$(ui_required_input "App Path" "Media stack directory inside the LXC" "$APP_DIR")"
-  NAS_EXPORT="$(ui_required_input "Media Storage" "Primary NFS export (server:/path)" "$NAS_EXPORT")"
-  HOST_NAS="$(ui_required_input "Media Storage" "Proxmox host mount path for the primary export" "$HOST_NAS")"
+  collect_primary_storage 1
   collect_secondary_nas
   GPU_MODE="$(ui_gpu_menu)"
 
@@ -613,7 +662,11 @@ collect_advanced_settings() {
 
 collect_login_settings() {
   if pct status "$CTID" >/dev/null 2>&1; then
-    if ui_yesno "Existing CT${CTID}" "CT${CTID} already exists. Destroy and replace it?" "no"; then
+    local replace_prompt="CT${CTID} already exists. Destroy and replace it?"
+    if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
+      replace_prompt+=" WARNING: this also deletes its Proxmox-managed onboard media disk and all content on it."
+    fi
+    if ui_yesno "Existing CT${CTID}" "$replace_prompt" "no"; then
       REPLACE=1
     else
       REPLACE=0
@@ -637,7 +690,13 @@ collect_login_settings() {
 
 settings_summary() {
   local mode_label="${SETTINGS_MODE^}"
+  local primary_storage=""
   [[ "$VERBOSE" == "1" ]] && mode_label+=" (verbose)"
+  if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
+    primary_storage="onboard ${LOCAL_MEDIA_STORAGE}:${LOCAL_MEDIA_SIZE_GB}G -> /mnt/nas"
+  else
+    primary_storage="NFS ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas"
+  fi
   cat <<EOF
 Install Jellyfin Media Stack with these settings:
 
@@ -648,7 +707,7 @@ Template storage: ${TEMPLATE_STORAGE}
 CPU / RAM / Swap: ${CORES} cores / ${MEMORY_MB} MB / ${SWAP_MB} MB
 Network: ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'), ip=${IP_CONFIG}
 DNS / Timezone: $([[ -n "$NAMESERVER" ]] && printf '%s' "$NAMESERVER" || printf 'inherit host') / ${TIMEZONE}
-Primary NFS: ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas
+Primary media: ${primary_storage}
 Secondary NFS: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
 GPU: ${GPU_MODE}
 Start / Auto-configure: $([[ "$START_STACK" == "1" ]] && printf yes || printf no) / $([[ "$AUTO_CONFIGURE" == "1" ]] && printf yes || printf no)
@@ -710,6 +769,15 @@ parse_args() {
       --ip-config) IP_CONFIG="$2"; shift 2 ;;
       --nameserver) NAMESERVER="$2"; shift 2 ;;
       --timezone) TIMEZONE="$2"; shift 2 ;;
+      --media-storage)
+        case "$2" in
+          nfs|local) PRIMARY_STORAGE_MODE="$2" ;;
+          *) die "Invalid --media-storage value: $2. Use nfs or local." ;;
+        esac
+        shift 2
+        ;;
+      --local-media-storage) PRIMARY_STORAGE_MODE="local"; LOCAL_MEDIA_STORAGE="$2"; shift 2 ;;
+      --local-media-size) PRIMARY_STORAGE_MODE="local"; LOCAL_MEDIA_SIZE_GB="$2"; shift 2 ;;
       --nas-export) NAS_EXPORT="$2"; shift 2 ;;
       --host-nas) HOST_NAS="$2"; shift 2 ;;
       --enable-qnap) ENABLE_QNAP=1; shift ;;
@@ -768,6 +836,19 @@ first_active_storage() {
     awk 'NR > 1 && $3 == "active" { print $1 }'
 }
 
+preferred_media_storage() {
+  local storage=""
+  storage="$(
+    pvesm status --content rootdir 2>/dev/null |
+      awk 'NR > 1 && $3 == "active" && $6 ~ /^[0-9]+$/ && $6 > available {
+        available = $6
+        name = $1
+      }
+      END { print name }'
+  )"
+  printf '%s\n' "${storage:-$ROOTFS_STORAGE}"
+}
+
 resolve_platform_defaults() {
   local available=""
 
@@ -798,6 +879,10 @@ resolve_platform_defaults() {
     [[ -n "$TIMEZONE" && "$TIMEZONE" != "n/a" ]] || TIMEZONE="$(cat /etc/timezone 2>/dev/null || true)"
     TIMEZONE="${TIMEZONE:-UTC}"
   fi
+
+  if [[ "$LOCAL_MEDIA_STORAGE" == "auto" ]]; then
+    LOCAL_MEDIA_STORAGE="$(preferred_media_storage)"
+  fi
 }
 
 validate_integer() {
@@ -819,9 +904,21 @@ validate_settings() {
     (( 10#$VLAN_TAG >= 1 && 10#$VLAN_TAG <= 4094 )) || die "VLAN must be from 1 to 4094."
   fi
 
-  [[ -n "$NAS_EXPORT" ]] || die "A primary NFS export is required. Rerun the guided setup or pass --nas-export server:/path."
-  [[ "$NAS_EXPORT" == *:* ]] || die "Invalid NFS export '${NAS_EXPORT}'. Expected server:/path."
-  [[ "$HOST_NAS" == /* ]] || die "Primary host mount path must be absolute (got '${HOST_NAS}')."
+  case "$PRIMARY_STORAGE_MODE" in
+    nfs)
+      [[ -n "$NAS_EXPORT" ]] || die "A primary NFS export is required. Rerun the guided setup or pass --nas-export server:/path."
+      [[ "$NAS_EXPORT" == *:* ]] || die "Invalid NFS export '${NAS_EXPORT}'. Expected server:/path."
+      [[ "$HOST_NAS" == /* ]] || die "Primary host mount path must be absolute (got '${HOST_NAS}')."
+      ;;
+    local)
+      validate_integer "Onboard media disk size" "$LOCAL_MEDIA_SIZE_GB" 8
+      first_active_storage rootdir | grep -Fxq "$LOCAL_MEDIA_STORAGE" ||
+        die "Onboard media storage '${LOCAL_MEDIA_STORAGE}' is not active or does not support LXC volumes."
+      ;;
+    *)
+      die "Primary media storage mode must be nfs or local (got '${PRIMARY_STORAGE_MODE}')."
+      ;;
+  esac
   if [[ "$ENABLE_QNAP" == "1" ]]; then
     [[ -n "$QNAP_EXPORT" && "$QNAP_EXPORT" == *:* ]] || die "--enable-qnap requires --qnap-export server:/path."
     [[ "$HOST_QNAP" == /* ]] || die "Secondary host mount path must be absolute (got '${HOST_QNAP}')."
@@ -917,7 +1014,11 @@ create_container() {
 
   if pct status "$CTID" >/dev/null 2>&1; then
     if [[ "$REPLACE" == "1" ]]; then
-      warn "CTID ${CTID} exists and --replace was set. Destroying it."
+      if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
+        warn "CTID ${CTID} exists and --replace was set. Destroying it, including its managed onboard media disk."
+      else
+        warn "CTID ${CTID} exists and --replace was set. Destroying it."
+      fi
       run pct stop "$CTID" --skiplock 1 || true
       run pct destroy "$CTID" --purge 1
     else
@@ -927,7 +1028,11 @@ create_container() {
 
   info "Creating CT${CTID} from ${template_ref}"
   run "${args[@]}"
-  run pct set "$CTID" -mp0 "${HOST_NAS},mp=/mnt/nas"
+  if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
+    run pct set "$CTID" -mp0 "${LOCAL_MEDIA_STORAGE}:${LOCAL_MEDIA_SIZE_GB},mp=/mnt/nas"
+  else
+    run pct set "$CTID" -mp0 "${HOST_NAS},mp=/mnt/nas"
+  fi
   run pct set "$CTID" -mp1 "${HOST_QNAP},mp=/mnt/qnap"
   run pct set "$CTID" --tags "media;docker;jellyfin"
 }
@@ -1356,7 +1461,7 @@ configure_stack() {
     return
   fi
 
-  info "Configuring NAS paths and connecting the media applications"
+  info "Configuring media storage paths and connecting the media applications"
   pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' '${APP_DIR}/configure-media-stack.sh'"
 }
 
@@ -1451,7 +1556,11 @@ main() {
   show_install_plan
 
   info "Deploying Jellyfin/media stack to CT${CTID}"
-  prepare_nfs_mount "primary media" "$NAS_EXPORT" "$HOST_NAS" 1
+  if [[ "$PRIMARY_STORAGE_MODE" == "nfs" ]]; then
+    prepare_nfs_mount "primary media" "$NAS_EXPORT" "$HOST_NAS" 1
+  else
+    info "Using Proxmox-managed onboard media disk ${LOCAL_MEDIA_STORAGE}:${LOCAL_MEDIA_SIZE_GB}G"
+  fi
   if [[ "$ENABLE_QNAP" == "1" ]]; then
     prepare_nfs_mount "secondary media" "$QNAP_EXPORT" "$HOST_QNAP" 1
   else

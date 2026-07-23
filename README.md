@@ -2,7 +2,7 @@
 
 Deploy a complete, auto-configured Jellyfin media stack into an unprivileged
 Debian LXC on a Proxmox VE host with a single command. Optional NVIDIA GPU
-transcoding, NFS media storage, and a guided terminal UI are all built in.
+transcoding, onboard or NFS media storage, and a guided terminal UI are built in.
 
 The installer doesn't just start containers — it **wires the whole stack
 together automatically** (download client, indexers, libraries, requests,
@@ -46,7 +46,8 @@ Everything is reachable from the **Media Stack Home** page at
 ## Requirements
 
 - A **Proxmox VE** host (run the installer on the host, as root)
-- An **NFS export** for media (required). A second NFS export (e.g. a QNAP) is optional.
+- Either free **onboard Proxmox storage** or an **NFS export** for media. A
+  second NFS export (e.g. a QNAP) is optional.
 - Optional: an **NVIDIA** (NVENC/CUDA) or **AMD** (VAAPI) GPU on the host for
   hardware transcoding — auto-detected, NVIDIA preferred when both are present
 - A VPN account for Gluetun (defaults assume NordVPN; edit `docker-compose.yml`
@@ -88,8 +89,9 @@ Running with no flags launches the Proxmox-style terminal installer. It has a
 branded header and the familiar settings menu:
 
 - **Default Settings** uses detected Proxmox storage/timezone, untagged DHCP,
-  automatic GPU selection, and the standard resource allocation. It asks only
-  for the required NFS export plus stack credentials.
+  automatic GPU selection, and the standard resource allocation. It asks
+  whether media should use a managed onboard disk or an NFS/NAS export, then
+  collects only the settings required for that choice and the stack credentials.
 - **Default Settings (verbose)** uses the same answers and shows command output.
 - **Advanced Settings** walks through container, template, resource, network,
   storage, GPU, and application options.
@@ -100,6 +102,13 @@ green completion checks. Full output remains in a protected
 installer reattaches to the controlling terminal when the bootstrap was piped
 into Bash, so whiptail is not silently skipped. If no terminal is available,
 it stops safely and requires an explicit `--no-gui` unattended run.
+
+Onboard mode creates a separate Proxmox-managed LXC volume and mounts it at
+`/mnt/nas`, so every application uses the same paths as an NFS installation.
+The guided installer selects the active storage pool with the most available
+space and lets you change both the pool and volume size before installation.
+Destroying/replacing that LXC also destroys its managed onboard media volume;
+the installer displays this warning before replacing an existing container.
 
 ### Unattended install
 
@@ -135,7 +144,10 @@ can be overridden by a flag or environment variable. Key settings:
 |---------|------|---------|
 | Proxmox root storage | `--storage` | auto-detected active `rootdir` storage |
 | Template storage | `--template-storage` | auto-detected active `vztmpl` storage |
-| NAS NFS export (**required**) | `--nas-export` | prompted; no unattended default |
+| Primary media type | `--media-storage nfs\|local` | NFS in unattended mode; prompted in guided mode |
+| Onboard media pool | `--local-media-storage` | active Proxmox storage with the most free space |
+| Onboard media size | `--local-media-size` | 100 GB |
+| NAS NFS export | `--nas-export` | required only for NFS mode |
 | Second NAS (optional) | `--enable-qnap` / `--qnap-export` | disabled |
 | Container DNS | `--nameserver` | inherit from the Proxmox host |
 | VLAN tag | `--vlan` | untagged |

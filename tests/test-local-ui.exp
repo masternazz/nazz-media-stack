@@ -2,12 +2,12 @@
 set timeout 120
 
 if {$argc != 1} {
-  puts stderr "usage: test-default-ui.exp /path/to/install-jellyfin-stack.sh"
+  puts stderr "usage: test-local-ui.exp /path/to/install-jellyfin-stack.sh"
   exit 2
 }
 
 set installer [lindex $argv 0]
-spawn env TERM=xterm-256color bash $installer --dry-run
+spawn env TERM=xterm-256color bash $installer --dry-run --media-storage local
 
 expect -re {Default Settings.*recommended}
 send -- "\r"
@@ -15,8 +15,11 @@ send -- "\r"
 expect -re {Onboard Proxmox storage}
 send -- "\r"
 
-expect -re {Primary NFS export}
-send -- "192.0.2.10:/media\r"
+expect -re {Proxmox storage pool}
+send -- "\r"
+
+expect -re {Media disk size in GB}
+send -- "\r"
 
 expect -re {Enable a second NFS mount}
 send -- "\r"
@@ -33,6 +36,7 @@ send -- "\r"
 after 750
 send -- "\r"
 
+expect -re {onboard .*:100G -> /mnt/nas}
 expect -re {Dry run completed successfully}
 expect eof
 

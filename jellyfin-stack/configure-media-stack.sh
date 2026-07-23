@@ -66,7 +66,7 @@ validate_storage() {
   pgid="$(env_value PGID 65534)"
   [[ "$puid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || die "PUID and PGID must be numeric."
 
-  info "Validating mounted NAS paths"
+  info "Validating primary media storage paths"
   for path in \
     /mnt/nas/media/movies \
     /mnt/nas/media/tv \
@@ -88,9 +88,9 @@ validate_storage() {
   test_file="/mnt/nas/torrents/.mediastack-write-test-$$"
   if command -v setpriv >/dev/null 2>&1; then
     setpriv --reuid "$puid" --regid "$pgid" --clear-groups touch "$test_file" ||
-      die "NAS is not writable by PUID ${puid}:PGID ${pgid}."
+      die "Media storage is not writable by PUID ${puid}:PGID ${pgid}."
   else
-    touch "$test_file" || die "NAS torrent path is not writable."
+    touch "$test_file" || die "Media storage torrent path is not writable."
   fi
   rm -f -- "$test_file"
 
@@ -705,7 +705,7 @@ main() {
   cat >"${APP_DIR}/INSTALL-RESULTS.txt" <<'EOF'
 Automatic media-stack configuration completed.
 
-- NAS media and torrent paths were validated for the configured PUID/PGID.
+- Primary media and torrent paths were validated for the configured PUID/PGID.
 - qBittorrent uses /data/torrents and has per-application categories.
 - Sonarr, Radarr, and Lidarr use /data/media roots and qBittorrent via Gluetun.
 - Prowlarr syncs indexers to Sonarr, Radarr, and Lidarr.

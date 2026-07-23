@@ -92,24 +92,24 @@ verify_qbittorrent() {
     http://127.0.0.1:8080/api/v2/auth/login || { rm -f "$cookie"; die "qBittorrent shared login failed."; }
   preferences="$(curl -fsS -b "$cookie" http://127.0.0.1:8080/api/v2/app/preferences)"
   jq -e '.save_path == "/data/torrents" and .temp_path == "/data/torrents/incomplete" and .temp_path_enabled == true' <<<"$preferences" >/dev/null || {
-    rm -f "$cookie"; die "qBittorrent NAS paths are not configured.";
+    rm -f "$cookie"; die "qBittorrent media paths are not configured.";
   }
   categories="$(curl -fsS -b "$cookie" http://127.0.0.1:8080/api/v2/torrents/categories)"
   jq -e 'has("movies") and has("tv") and has("anime") and has("music") and has("books") and has("comics")' <<<"$categories" >/dev/null || {
     rm -f "$cookie"; die "qBittorrent categories are incomplete.";
   }
   rm -f "$cookie"
-  info "qBittorrent shared login, NAS paths, and categories pass"
+  info "qBittorrent shared login, media paths, and categories pass"
 }
 
 verify_arr_wiring() {
   local roots clients applications
   roots="$(arr_get sonarr 8989 v3 rootfolder)"
-  jq -e 'map(.path) | index("/data/media/tv") and index("/data/media/anime")' <<<"$roots" >/dev/null || die "Sonarr NAS roots are incomplete."
+  jq -e 'map(.path) | index("/data/media/tv") and index("/data/media/anime")' <<<"$roots" >/dev/null || die "Sonarr media roots are incomplete."
   roots="$(arr_get radarr 7878 v3 rootfolder)"
-  jq -e 'map(.path) | index("/data/media/movies")' <<<"$roots" >/dev/null || die "Radarr NAS root is missing."
+  jq -e 'map(.path) | index("/data/media/movies")' <<<"$roots" >/dev/null || die "Radarr media root is missing."
   roots="$(arr_get lidarr 8686 v1 rootfolder)"
-  jq -e 'map(.path) | index("/data/media/music")' <<<"$roots" >/dev/null || die "Lidarr NAS root is missing."
+  jq -e 'map(.path) | index("/data/media/music")' <<<"$roots" >/dev/null || die "Lidarr media root is missing."
 
   clients="$(arr_get sonarr 8989 v3 downloadclient)"
   jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Sonarr qBittorrent connection is missing."
