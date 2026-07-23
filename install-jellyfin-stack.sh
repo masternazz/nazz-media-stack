@@ -17,7 +17,7 @@ SWAP_MB="${SWAP_MB:-512}"
 BRIDGE="${BRIDGE:-vmbr0}"
 VLAN_TAG="${VLAN_TAG:-}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"
-NAMESERVER="${NAMESERVER:-}"
+NAMESERVER="${NAMESERVER:-auto}"
 TIMEZONE="${TZ:-auto}"
 APP_DIR="${APP_DIR:-/opt/mediastack}"
 
@@ -91,7 +91,7 @@ Core options:
   --bridge NAME             Proxmox bridge (default: vmbr0)
   --vlan ID                 VLAN tag (default: untagged)
   --ip-config VALUE         Proxmox ip= value, e.g. dhcp or 192.168.1.50/24,gw=192.168.1.1
-  --nameserver IP           Container DNS server (default: inherit from Proxmox)
+  --nameserver IP           Container DNS server (default: auto-detect a usable resolver)
   --timezone ZONE           Container timezone (default: Proxmox host timezone)
 
 Storage:
@@ -637,7 +637,7 @@ collect_advanced_settings() {
   BRIDGE="$(ui_required_input "Network" "Proxmox bridge" "$BRIDGE")"
   VLAN_TAG="$(ui_input "Network" "VLAN tag (leave blank for an untagged network)" "$VLAN_TAG")"
   IP_CONFIG="$(ui_required_input "Network" "Proxmox ip= value" "$IP_CONFIG")"
-  NAMESERVER="$(ui_input "DNS" "Nameserver (leave blank to inherit the Proxmox resolver)" "$NAMESERVER")"
+  NAMESERVER="$(ui_required_input "DNS" "Container nameserver (use auto to detect one from this host)" "$NAMESERVER")"
   TIMEZONE="$(ui_required_input "Timezone" "Container timezone" "$TIMEZONE")"
   APP_DIR="$(ui_required_input "App Path" "Media stack directory inside the LXC" "$APP_DIR")"
   collect_primary_storage 1
@@ -715,7 +715,7 @@ Root storage: ${ROOTFS_STORAGE}:${DISK_GB}G
 Template storage: ${TEMPLATE_STORAGE}
 CPU / RAM / Swap: ${CORES} cores / ${MEMORY_MB} MB / ${SWAP_MB} MB
 Network: ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'), ip=${IP_CONFIG}
-DNS / Timezone: $([[ -n "$NAMESERVER" ]] && printf '%s' "$NAMESERVER" || printf 'inherit host') / ${TIMEZONE}
+DNS / Timezone: ${NAMESERVER} / ${TIMEZONE}
 Primary media: ${primary_storage}
 Secondary NFS: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
 GPU: ${GPU_MODE}
@@ -918,6 +918,61 @@ validate_storage_capacity() {
   fi
 }
 
+is_usable_nameserver() {
+  local candidate="$1"
+  local octet
+  case "$candidate" in
+    ""|127.*|0.0.0.0|::1|fe80:*|*%*) return 1 ;;
+  esac
+
+  if [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    local -a octets=()
+    IFS='.' read -r -a octets <<<"$candidate"
+    for octet in "${octets[@]}"; do
+      (( 10#$octet <= 255 )) || return 1
+    done
+    return 0
+  fi
+
+  [[ "$candidate" == *:* && "$candidate" =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+detect_nameserver() {
+  local candidate=""
+
+  while IFS= read -r candidate; do
+    if is_usable_nameserver "$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done < <(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null)
+
+  if command -v resolvectl >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      if is_usable_nameserver "$candidate"; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done < <(resolvectl dns 2>/dev/null | sed -E 's/^[^:]+:[[:space:]]*//' | tr ' ' '\n')
+  fi
+
+  candidate="$(ip -4 route show default 2>/dev/null | awk 'NR == 1 { print $3 }')"
+  if is_usable_nameserver "$candidate"; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  printf '1.1.1.1\n'
+}
+
+resolve_nameserver() {
+  if [[ -z "$NAMESERVER" || "$NAMESERVER" == "auto" ]]; then
+    NAMESERVER="$(detect_nameserver)"
+  fi
+  is_usable_nameserver "$NAMESERVER" ||
+    die "Nameserver must be a usable IPv4 or IPv6 address (got '${NAMESERVER}')."
+}
+
 resolve_platform_defaults() {
   local available=""
 
@@ -949,6 +1004,8 @@ resolve_platform_defaults() {
     TIMEZONE="${TIMEZONE:-UTC}"
   fi
 
+  resolve_nameserver
+
   if [[ "$LOCAL_MEDIA_STORAGE" == "auto" ]]; then
     LOCAL_MEDIA_STORAGE="$(preferred_media_storage)"
   fi
@@ -963,6 +1020,7 @@ validate_integer() {
 }
 
 validate_settings() {
+  resolve_nameserver
   resolve_local_media_size
   validate_integer "Disk size" "$DISK_GB" 8
   validate_integer "CPU cores" "$CORES" 1
@@ -1242,13 +1300,26 @@ start_container() {
     return
   fi
 
+  # Pin a real resolver inside the guest. Inheriting a Proxmox host's loopback
+  # stub (for example 127.0.0.53) leaves the LXC unable to resolve package hosts.
+  run pct set "$CTID" --nameserver "$NAMESERVER"
+  run pct exec "$CTID" -- sh -c \
+    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:3\n" "$1" > /etc/resolv.conf' \
+    sh "$NAMESERVER"
+
+  local ready_count=0
   for _ in $(seq 1 60); do
     if pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1; then
-      return
+      ready_count=$(( ready_count + 1 ))
+      if (( ready_count >= 3 )); then
+        return
+      fi
+    else
+      ready_count=0
     fi
     sleep 2
   done
-  die "CT${CTID} started, but DNS/network did not become ready."
+  die "CT${CTID} started, but it could not reliably resolve deb.debian.org using ${NAMESERVER}. Check the bridge, VLAN, gateway, and firewall."
 }
 
 install_docker() {
@@ -1259,16 +1330,43 @@ install_docker() {
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
-apt-get update
-apt-get install -y ca-certificates curl gnupg jq python3 python3-yaml util-linux
+
+wait_for_dns() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if getent hosts deb.debian.org >/dev/null 2>&1; then
+      return
+    fi
+    sleep 2
+  done
+  echo "DNS did not resolve deb.debian.org after 60 seconds." >&2
+  return 1
+}
+
+apt_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if apt-get -o Acquire::Retries=3 "$@"; then
+      return
+    fi
+    echo "apt-get failed (attempt ${attempt}/3); retrying..." >&2
+    sleep $(( attempt * 5 ))
+  done
+  return 1
+}
+
+wait_for_dns
+apt_retry update
+apt_retry install -y ca-certificates curl gnupg jq python3 python3-yaml util-linux
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+curl --retry 5 --retry-all-errors --connect-timeout 15 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 . /etc/os-release
 arch="$(dpkg --print-architecture)"
 printf "deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian %s stable\n" "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+wait_for_dns
+apt_retry update
+apt_retry install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 '
 }

@@ -158,7 +158,7 @@ can be overridden by a flag or environment variable. Key settings:
 | Onboard media size | `--local-media-size` | auto-sized from free space, up to 100 GB |
 | NAS NFS export | `--nas-export` | required only for NFS mode |
 | Second NAS (optional) | `--enable-qnap` / `--qnap-export` | disabled |
-| Container DNS | `--nameserver` | inherit from the Proxmox host |
+| Container DNS | `--nameserver` | auto-detect a usable non-loopback resolver |
 | VLAN tag | `--vlan` | untagged |
 | Timezone | `--timezone` | Proxmox host timezone |
 | GPU passthrough | `--gpu auto\|nvidia\|amd\|off` | auto-detect |
