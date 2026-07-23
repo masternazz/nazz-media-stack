@@ -55,11 +55,11 @@ collect_advanced_settings
 # Onboard storage keeps the existing /mnt/nas application layout while using a
 # Proxmox-managed LXC volume instead of an NFS bind mount.
 ui_primary_storage_menu() { printf 'local\n'; }
-LOCAL_MEDIA_STORAGE="firstmoonstorage"
+LOCAL_MEDIA_STORAGE="test-media-pool"
 LOCAL_MEDIA_SIZE_GB="250"
 collect_primary_storage 0
 [[ "$PRIMARY_STORAGE_MODE" == "local" ]]
-[[ "$LOCAL_MEDIA_STORAGE" == "firstmoonstorage" ]]
+[[ "$LOCAL_MEDIA_STORAGE" == "test-media-pool" ]]
 [[ "$LOCAL_MEDIA_SIZE_GB" == "250" ]]
 [[ -z "$NAS_EXPORT" ]]
 
@@ -69,6 +69,6 @@ RESOLVED_TEMPLATE_REF="local:vztmpl/debian-test.tar.zst"
 ROOTFS_STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 create_output="$(create_container "$RESOLVED_TEMPLATE_REF")"
-grep -Fq -- '--mp0 firstmoonstorage:250\,mp=/mnt/nas' <<<"$create_output"
+grep -Fq -- '--mp0 test-media-pool:250\,mp=/mnt/nas' <<<"$create_output"
 
 printf 'installer UI mode tests passed\n'

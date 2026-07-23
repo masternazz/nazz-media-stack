@@ -134,16 +134,24 @@ secured reverse proxy. The complete port table is below.
 
 ## Quick start
 
-Run the public, checksum-pinned bootstrap on the Proxmox host:
+Run the current GitHub installer directly on the Proxmox host:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
+```
+
+This is the easiest installation method. It downloads the current `main`
+branch into a temporary directory and opens the guided installer. No clone or
+local repository checkout is required.
+
+The separately hosted, checksum-pinned release bundle is also available:
 
 ```bash
 bash -c "$(curl -fsSL https://cloud.masternazz.com/s/ddfie8QwGyZp9Hi/download)"
 ```
 
-This is the easiest installation method. The bootstrap downloads the release
-bundle, verifies its SHA-256 checksum, and opens the guided installer.
-
-To use the repository directly:
+That hosted bundle can lag behind GitHub `main`. To use the repository
+directly:
 
 ```bash
 git clone https://github.com/masternazz/nazz-media-stack.git
@@ -151,10 +159,6 @@ cd nazz-media-stack
 chmod +x install-jellyfin-stack.sh
 ./install-jellyfin-stack.sh
 ```
-
-This repository is currently private. Cloning it or downloading `install.sh`
-from `raw.githubusercontent.com` requires GitHub access to the repository. The
-public bootstrap above does not require GitHub authentication.
 
 ### Before pressing Install
 
@@ -172,12 +176,22 @@ that container owns an onboard media volume, its media data is destroyed too.
 
 ### Fix an existing blank/default install
 
-Do not destroy or reinstall the LXC. Update a repository checkout on the
-Proxmox host, then run the included fix entrypoint:
+Do not destroy or reinstall the LXC. Run the current fix directly from GitHub:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/fix-existing-install.sh)" -- <CTID>
+```
+
+Example:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/fix-existing-install.sh)" -- 128
+```
+
+No clone is required. From an existing repository checkout, the equivalent is:
 
 ```bash
 git pull
-chmod +x fix-existing-install.sh
 ./fix-existing-install.sh <CTID>
 ```
 
@@ -255,7 +269,7 @@ bootstrap is piped into Bash. If the terminal UI is still unusable, run the
 plain-text path:
 
 ```bash
-TERM=dumb bash -c "$(curl -fsSL https://cloud.masternazz.com/s/ddfie8QwGyZp9Hi/download)"
+TERM=dumb bash -c "$(curl -fsSL https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
 ```
 
 Use arrow keys to move, Space to select checklist items, Tab to change buttons,
