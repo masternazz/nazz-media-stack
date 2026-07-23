@@ -68,6 +68,8 @@ validate_storage() {
 
   info "Validating primary media storage paths"
   for path in \
+    /mnt/nas/media \
+    /mnt/nas/torrents \
     /mnt/nas/media/movies \
     /mnt/nas/media/tv \
     /mnt/nas/media/anime \

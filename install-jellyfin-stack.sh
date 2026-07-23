@@ -1559,6 +1559,8 @@ for dir in \
   '${APP_DIR}/config/recyclarr' \
   '${APP_DIR}/config/profilarr' \
   '${APP_DIR}/config/homarr' \
+  /mnt/nas/media \
+  /mnt/nas/torrents \
   /mnt/nas/media/movies \
   /mnt/nas/media/tv \
   /mnt/nas/media/anime \
