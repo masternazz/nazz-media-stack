@@ -7,6 +7,7 @@ Wants=docker.service network-online.target remote-fs.target
 Type=oneshot
 Environment=APP_DIR=/opt/mediastack
 Environment=QNAP_REQUIRED=1
+Environment=DOWNLOADS_ENABLED=auto
 EnvironmentFile=-/etc/default/mediastack-subtitles
 ExecStart=/bin/bash -lc 'exec "$APP_DIR/fix-subtitles.sh"'
 TimeoutStartSec=4h

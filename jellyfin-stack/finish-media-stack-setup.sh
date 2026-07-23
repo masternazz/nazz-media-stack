@@ -37,10 +37,12 @@ main() {
   apply_trash="$(env_value APPLY_TRASH 1)"
   subtitle_timer="$(env_value SUBTITLE_REPAIR_TIMER_ENABLED 1)"
   compose_cmd="$(cat "${APP_DIR}/.compose-command")"
+  compose_cmd="${compose_cmd// --profile vpn/} --profile vpn"
+  printf '%s\n' "$compose_cmd" >"${APP_DIR}/.compose-command"
 
   info "Starting every media-stack container, including Gluetun and qBittorrent"
   cd "$APP_DIR"
-  bash -lc "cd '$APP_DIR' && ${compose_cmd} up -d"
+  bash -lc "cd '$APP_DIR' && ${compose_cmd} pull && ${compose_cmd} up -d"
 
   info "Applying application logins, libraries, paths, integrations, and dashboards"
   APP_DIR="$APP_DIR" \

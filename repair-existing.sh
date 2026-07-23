@@ -107,20 +107,24 @@ set_key SUBTITLE_REPAIR_TIMER_ENABLED '${SUBTITLE_REPAIR_TIMER_ENABLED}'
 chmod 0600 '${APP_DIR}/.env'
 "
 
-  local vpn_user vpn_password downloads_enabled=1 compose_cmd core_services
+  local vpn_user vpn_password downloads_enabled=1 compose_cmd
   vpn_user="$(env_value_in_lxc NORDVPN_USER)"
   vpn_password="$(env_value_in_lxc NORDVPN_PASS)"
   if is_placeholder "$vpn_user" || is_placeholder "$vpn_password"; then
     downloads_enabled=0
   fi
   compose_cmd="$(pct_bash "cat '${APP_DIR}/.compose-command'")"
-  core_services="prowlarr byparr sonarr radarr lidarr bazarr kavita mylar jellyfin jellyseerr wizarr jellystat-db jellystat recyclarr profilarr mediastack-home homarr portainer"
+  compose_cmd="${compose_cmd// --profile vpn/}"
 
   if [[ "$downloads_enabled" == "1" ]]; then
-    pct_bash "cd '${APP_DIR}' && ${compose_cmd} up -d"
+    compose_cmd+=" --profile vpn"
+    pct_bash "printf '%s\n' '${compose_cmd}' > '${APP_DIR}/.compose-command'"
+    pct_bash "cd '${APP_DIR}' && ${compose_cmd} pull && ${compose_cmd} up -d"
   else
     printf 'VPN credentials are still placeholders; repairing core apps only.\n'
-    pct_bash "cd '${APP_DIR}' && ${compose_cmd} up -d ${core_services}"
+    pct_bash "printf '%s\n' '${compose_cmd}' > '${APP_DIR}/.compose-command'"
+    pct_bash "cd '${APP_DIR}' && { ${compose_cmd} stop qbittorrent gluetun >/dev/null 2>&1 || true; }"
+    pct_bash "cd '${APP_DIR}' && ${compose_cmd} pull && ${compose_cmd} up -d"
   fi
 
   pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${QNAP_ENABLED}' APPLY_TRASH='${APPLY_TRASH}' DOWNLOADS_ENABLED='${downloads_enabled}' '${APP_DIR}/configure-media-stack.sh'"

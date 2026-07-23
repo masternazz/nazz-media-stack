@@ -9,6 +9,7 @@ BAZARR_URL="${BAZARR_URL:-http://127.0.0.1:6767}"
 JELLYFIN_URL="${JELLYFIN_URL:-http://127.0.0.1:8096}"
 JELLYFIN_API_KEY_FILE="${JELLYFIN_API_KEY_FILE:-${APP_DIR}/.jellyfin-api-key}"
 QNAP_REQUIRED="${QNAP_REQUIRED:-1}"
+DOWNLOADS_ENABLED="${DOWNLOADS_ENABLED:-auto}"
 PROVIDER_CHANGES=1
 DRY_RUN=0
 INSTALL_TIMER=0
@@ -95,6 +96,19 @@ preflight() {
   [[ "$TASK_WAIT_SECONDS" =~ ^[0-9]+$ && "$TASK_WAIT_SECONDS" -ge 30 ]] || \
     die "TASK_WAIT_SECONDS must be an integer of at least 30 seconds."
   [[ "$QNAP_REQUIRED" == "0" || "$QNAP_REQUIRED" == "1" ]] || die "QNAP_REQUIRED must be 0 or 1."
+  [[ "$DOWNLOADS_ENABLED" == "auto" || "$DOWNLOADS_ENABLED" == "0" || "$DOWNLOADS_ENABLED" == "1" ]] ||
+    die "DOWNLOADS_ENABLED must be auto, 0, or 1."
+}
+
+resolve_downloads_mode() {
+  if [[ "$DOWNLOADS_ENABLED" == "auto" ]]; then
+    if [[ -s "${APP_DIR}/.compose-command" ]] &&
+       grep -Eq '(^|[[:space:]])--profile[[:space:]]+vpn([[:space:]]|$)' "${APP_DIR}/.compose-command"; then
+      DOWNLOADS_ENABLED=1
+    else
+      DOWNLOADS_ENABLED=0
+    fi
+  fi
 }
 
 acquire_lock() {
@@ -114,7 +128,7 @@ install_timer() {
   if [[ "$DRY_RUN" == "1" ]]; then
     info "[dry-run] install systemd service from ${service_src}"
     info "[dry-run] install systemd timer from ${timer_src}"
-    info "[dry-run] write ${defaults_file} with APP_DIR and QNAP_REQUIRED (no secrets)"
+    info "[dry-run] write ${defaults_file} with APP_DIR, QNAP_REQUIRED, and DOWNLOADS_ENABLED (no secrets)"
     info "[dry-run] systemctl enable --now fix-subtitles.timer"
     return
   fi
@@ -125,6 +139,7 @@ install_timer() {
   {
     printf 'APP_DIR=%s\n' "$APP_DIR"
     printf 'QNAP_REQUIRED=%s\n' "$QNAP_REQUIRED"
+    printf 'DOWNLOADS_ENABLED=%s\n' "$DOWNLOADS_ENABLED"
   } >"$defaults_file"
   chmod 0644 "$defaults_file"
   systemctl daemon-reload
@@ -220,6 +235,9 @@ verify_and_repair_container_binds() {
   local spec container source destination
   for spec in "${bind_specs[@]}"; do
     IFS='|' read -r container source destination <<<"$spec"
+    if [[ "$DOWNLOADS_ENABLED" == "0" && "$container" == "qbittorrent" ]]; then
+      continue
+    fi
     if [[ "$QNAP_REQUIRED" == "0" && "$source" == /mnt/qnap* ]]; then
       continue
     fi
@@ -257,6 +275,7 @@ verify_and_repair_container_binds() {
 
   for spec in "${bind_specs[@]}"; do
     IFS='|' read -r container source destination <<<"$spec"
+    [[ "$DOWNLOADS_ENABLED" == "0" && "$container" == "qbittorrent" ]] && continue
     [[ "$QNAP_REQUIRED" == "0" && "$source" == /mnt/qnap* ]] && continue
     inspect_bind_mount "$container" "$source" "$destination" || \
       die "${container}:${destination} is still stale after recreation."
@@ -736,6 +755,7 @@ refresh_jellyfin() {
 main() {
   parse_args "$@"
   preflight
+  resolve_downloads_mode
   if [[ "$STATUS_ONLY" == "1" ]]; then
     wait_for_bazarr
     read_bazarr_api_key

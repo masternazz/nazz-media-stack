@@ -53,6 +53,11 @@ verify_containers() {
       [[ "$state" == "running" ]] || die "Container ${name} is ${state:-missing}."
     done
     [[ "$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || true)" == "healthy" ]] || die "Gluetun is not healthy."
+  else
+    for name in gluetun qbittorrent; do
+      state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+      [[ "$state" != "running" ]] || die "Container ${name} must remain stopped until VPN credentials are configured."
+    done
   fi
   [[ "$(docker inspect -f '{{.State.Health.Status}}' profilarr 2>/dev/null || true)" == "healthy" ]] || die "Profilarr is not healthy."
   [[ "$(docker inspect -f '{{.State.Health.Status}}' jellystat-db 2>/dev/null || true)" == "healthy" ]] || die "Jellystat PostgreSQL is not healthy."

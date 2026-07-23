@@ -2,6 +2,8 @@ services:
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
+    profiles:
+      - vpn
     cap_add:
       - NET_ADMIN
     devices:
@@ -25,6 +27,8 @@ services:
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
     container_name: qbittorrent
+    profiles:
+      - vpn
     network_mode: "service:gluetun"
     depends_on:
       - gluetun

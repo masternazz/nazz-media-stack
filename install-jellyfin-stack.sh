@@ -1803,9 +1803,11 @@ compose_command() {
 }
 
 start_stack() {
-  local cmd core_services
+  local cmd
   cmd="$(compose_command)"
-  core_services="prowlarr byparr sonarr radarr lidarr bazarr kavita mylar jellyfin jellyseerr wizarr jellystat-db jellystat recyclarr profilarr mediastack-home homarr portainer"
+  if [[ "$ENV_HAS_PLACEHOLDER" != "1" ]]; then
+    cmd+=" --profile vpn"
+  fi
   pct_bash "printf '%s\n' '${cmd}' > '${APP_DIR}/.compose-command'"
 
   if [[ "$START_STACK" != "1" ]]; then
@@ -1814,11 +1816,11 @@ start_stack() {
     return
   fi
 
-  info "Pulling media stack images"
+  info "Pulling enabled media stack images"
   pct_bash "cd '${APP_DIR}' && ${cmd} pull"
   if [[ "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
     info "Starting core media apps while VPN downloads remain disabled"
-    pct_bash "cd '${APP_DIR}' && ${cmd} up -d ${core_services}"
+    pct_bash "cd '${APP_DIR}' && ${cmd} up -d"
   else
     info "Starting complete media stack"
     pct_bash "cd '${APP_DIR}' && ${cmd} up -d"

@@ -170,21 +170,27 @@ Confirm the installation plan shown on screen, especially:
 `--replace` destroys the existing container before creating the new one. If
 that container owns an onboard media volume, its media data is destroyed too.
 
-### Repair an existing blank/default install
+### Fix an existing blank/default install
 
-Do not destroy or reinstall the LXC. From a repository checkout on the Proxmox
-host, run:
+Do not destroy or reinstall the LXC. Update a repository checkout on the
+Proxmox host, then run the included fix entrypoint:
 
 ```bash
-chmod +x repair-existing.sh
-./repair-existing.sh <CTID>
+git pull
+chmod +x fix-existing-install.sh
+./fix-existing-install.sh <CTID>
 ```
 
-The repair updates only the stack's compose/setup assets, preserves `.env`,
-application databases, configs, and media, then initializes the logins,
-libraries, application connections, Portainer environment, and Homarr
-dashboard. If VPN credentials are still placeholders, it repairs the core apps
-and prints the one command needed to finish downloads later.
+`fix-existing-install.sh` uses the local checkout when available and can also
+download the current GitHub version when run standalone. It calls the
+non-destructive `repair-existing.sh`, which updates only compose/setup assets
+and preserves `.env`, application databases, configs, and media. It then
+initializes the logins, libraries, application connections, Portainer
+environment, and Homarr dashboard.
+
+If VPN credentials are still placeholders, the fix starts and verifies every
+core service while leaving only Gluetun and qBittorrent stopped. It prints the
+one command needed to finish downloads later.
 
 ## Installer modes
 
@@ -401,10 +407,15 @@ is not already enabled for the desired codecs.
 
 qBittorrent shares Gluetun's network namespace and cannot bypass it.
 
-The default compose file expects **NordVPN manual-service credentials**. These
-are not necessarily the same as the email address and password used to sign in
-to the NordVPN website. Obtain the manual setup/service credentials from the
-VPN provider.
+The compose file places only Gluetun and qBittorrent in its opt-in `vpn`
+profile. A normal `docker compose up -d` therefore starts all 18 core services
+without attempting to start either VPN container. The installer enables the
+profile only after it finds usable VPN credentials.
+
+The VPN profile expects **NordVPN manual-service credentials**. These are not
+necessarily the same as the email address and password used to sign in to the
+NordVPN website. Obtain the manual setup/service credentials from the VPN
+provider.
 
 If you answer **No** when the installer asks for VPN credentials:
 
@@ -955,6 +966,7 @@ These logs may contain infrastructure details. Review them before sharing.
 |---|---|
 | `install.sh` | Small remote bootstrap |
 | `install-jellyfin-stack.sh` | Proxmox/LXC installer and guided UI |
+| `fix-existing-install.sh` | GitHub/local entrypoint for fixing a previous install |
 | `repair-existing.sh` | In-place repair for a blank or partially configured LXC |
 | `jellyfin-stack/docker-compose.yml` | Base application stack |
 | `jellyfin-stack/docker-compose.nvidia.yml` | NVIDIA compose overlay |
@@ -978,6 +990,7 @@ Run the local shell regression checks from the repository root:
 ```bash
 bash tests/test-installer-ui.sh
 bash tests/test-storage-mounts.sh
+bash tests/test-no-vpn-startup.sh
 ```
 
 The Expect scripts in `tests/` exercise guided dry-run paths when Expect is
