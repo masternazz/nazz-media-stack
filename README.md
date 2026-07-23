@@ -165,9 +165,10 @@ can be overridden by a flag or environment variable. Key settings:
 
 Guided installs ask whether the container uses an untagged network or a tagged
 VLAN. Choose the same VLAN as another working application container when the
-Proxmox host uses a segmented network. Every install configures an LXC `root`
-console password; unless `--root-password` is supplied, it matches the shared
-application admin password displayed at completion.
+Proxmox host uses a segmented network. Guided mode requires one password and
+confirms it once; that password is used for the LXC `root` console and the
+shared application admin login. Unattended mode generates a password only when
+one was not supplied. `--root-password` can still set a separate LXC password.
 
 Before installing packages, the installer requires stable IPv4 DNS and an
 outbound HTTP connection to Debian's repository. APT updates treat partial

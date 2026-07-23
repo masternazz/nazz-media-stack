@@ -457,6 +457,31 @@ ui_password() {
   printf '%s\n' "${value:-$default}"
 }
 
+ui_shared_password() {
+  local default="${1:-}"
+  local password=""
+  local confirmation=""
+
+  while :; do
+    password="$(ui_password "One Login Password" "Choose one password (12+ characters) for LXC root and the shared application admin login." "$default")"
+    if [[ ${#password} -lt 12 ]]; then
+      ui_message "Password Too Short" "Choose a password with at least 12 characters."
+      default=""
+      continue
+    fi
+
+    confirmation="$(ui_password "Confirm Login Password" "Enter the same password again." "")"
+    if [[ "$password" != "$confirmation" ]]; then
+      ui_message "Passwords Do Not Match" "The two passwords did not match. Please try again."
+      default=""
+      continue
+    fi
+
+    printf '%s\n' "$password"
+    return
+  done
+}
+
 ui_message() {
   local title="$1"
   local message="$2"
@@ -727,11 +752,7 @@ collect_login_settings() {
   fi
 
   MEDIASTACK_ADMIN_USER="$(ui_required_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
-  MEDIASTACK_ADMIN_PASSWORD="$(ui_password "Shared Admin Login" "Admin password (12+ characters) for the apps and LXC root login. Leave blank to generate one." "$MEDIASTACK_ADMIN_PASSWORD")"
-  if [[ -n "$MEDIASTACK_ADMIN_PASSWORD" && ${#MEDIASTACK_ADMIN_PASSWORD} -lt 12 ]]; then
-    ui_message "Invalid Password" "The shared admin password must be at least 12 characters. Leave it blank to generate a strong password."
-    MEDIASTACK_ADMIN_PASSWORD=""
-  fi
+  MEDIASTACK_ADMIN_PASSWORD="$(ui_shared_password "$MEDIASTACK_ADMIN_PASSWORD")"
   resolve_login_credentials
 }
 
