@@ -86,30 +86,49 @@ bash -c "$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 
 Running with no flags launches a guided terminal UI (whiptail) that prompts for
 container ID, storage, network, NAS export, GPU mode, and the shared admin login.
+The installer reattaches to the controlling terminal when the bootstrap itself
+was piped into Bash, so the setup UI is not silently skipped. If no terminal is
+available, it stops safely and requires an explicit `--no-gui` unattended run.
 
 ### Unattended install
 
 ```bash
 sudo NORDVPN_USER='token-user' NORDVPN_PASS='token-pass' \
   ./install-jellyfin-stack.sh --no-gui \
-  --storage local-lvm \
   --nas-export 192.168.1.10:/volume1/media \
-  --nameserver 1.1.1.1
+  --gpu off
 ```
 
 See all options with `./install-jellyfin-stack.sh --help`.
 
+### Building the hosted bundle
+
+Maintainers should build the archive from this repository, not from a
+homelab-specific copy of the installer:
+
+```bash
+bash scripts/build-release.sh
+```
+
+The command prints the SHA-256 value that must be pinned by the hosted
+bootstrap. This keeps private Proxmox storage, DNS, VLAN, and NAS defaults out
+of public releases.
+
 ## Configuration
 
-Every default can be overridden by a flag or environment variable. Key ones:
+Portable settings are auto-detected or start blank; none of Nazz's storage,
+DNS, VLAN, or NAS addresses are embedded in the public installer. Every default
+can be overridden by a flag or environment variable. Key settings:
 
 | Setting | Flag | Default |
 |---------|------|---------|
-| Proxmox storage | `--storage` | `local-lvm` |
-| NAS NFS export (**required**) | `--nas-export` | `nas.example.lan:/volume1/media` |
+| Proxmox root storage | `--storage` | auto-detected active `rootdir` storage |
+| Template storage | `--template-storage` | auto-detected active `vztmpl` storage |
+| NAS NFS export (**required**) | `--nas-export` | prompted; no unattended default |
 | Second NAS (optional) | `--enable-qnap` / `--qnap-export` | disabled |
-| Container DNS | `--nameserver` | `1.1.1.1` |
-| VLAN tag | `--vlan` | `6` |
+| Container DNS | `--nameserver` | inherit from the Proxmox host |
+| VLAN tag | `--vlan` | untagged |
+| Timezone | `--timezone` | Proxmox host timezone |
 | GPU passthrough | `--gpu auto\|nvidia\|amd\|off` | auto-detect |
 
 Copy `jellyfin-stack/.env.example` to `.env` and fill it in to pin secrets, or

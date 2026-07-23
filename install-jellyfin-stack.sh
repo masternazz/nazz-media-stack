@@ -6,25 +6,25 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 STACK_ASSET_DIR="${SCRIPT_DIR}/jellyfin-stack"
 
 CTID="${CTID:-auto}"
-CT_HOSTNAME="${CT_HOSTNAME:-Jellyfin}"
-TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
+CT_HOSTNAME="${CT_HOSTNAME:-jellyfin}"
+TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-auto}"
 TEMPLATE="${TEMPLATE:-auto}"
-ROOTFS_STORAGE="${ROOTFS_STORAGE:-local-lvm}"
+ROOTFS_STORAGE="${ROOTFS_STORAGE:-auto}"
 DISK_GB="${DISK_GB:-60}"
 CORES="${CORES:-2}"
 MEMORY_MB="${MEMORY_MB:-8000}"
 SWAP_MB="${SWAP_MB:-512}"
 BRIDGE="${BRIDGE:-vmbr0}"
-VLAN_TAG="${VLAN_TAG:-6}"
+VLAN_TAG="${VLAN_TAG:-}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"
-NAMESERVER="${NAMESERVER:-1.1.1.1}"
-TIMEZONE="${TZ:-America/New_York}"
+NAMESERVER="${NAMESERVER:-}"
+TIMEZONE="${TZ:-auto}"
 APP_DIR="${APP_DIR:-/opt/mediastack}"
 
-HOST_NAS="${HOST_NAS:-/mnt/synology}"
-NAS_EXPORT="${NAS_EXPORT:-nas.example.lan:/volume1/media}"
-HOST_QNAP="${HOST_QNAP:-/mnt/qnap_media}"
-QNAP_EXPORT="${QNAP_EXPORT:-nas.example.lan:/share/media}"
+HOST_NAS="${HOST_NAS:-/mnt/jellyfin-media}"
+NAS_EXPORT="${NAS_EXPORT:-}"
+HOST_QNAP="${HOST_QNAP:-/mnt/jellyfin-media-secondary}"
+QNAP_EXPORT="${QNAP_EXPORT:-}"
 ENABLE_QNAP=0
 GPU_MODE="auto"
 GPU_REQUIRE=0
@@ -55,6 +55,7 @@ NVIDIA_ACTIVE=0
 AMD_ACTIVE=0
 ENV_HAS_PLACEHOLDER=0
 RESOLVED_TEMPLATE_REF=""
+UI_BACKTITLE="Jellyfin Media Stack | Proxmox VE"
 
 usage() {
   cat <<'EOF'
@@ -67,24 +68,26 @@ with Docker and deploys the Jellyfin/media stack.
 Core options:
   --ctid ID                 LXC ID to create, or auto/next (default: next free ID)
   --nextid                  Use the next free Proxmox ID
-  --hostname NAME           LXC hostname (default: Jellyfin)
-  --storage NAME            Proxmox storage for rootfs (default: local-lvm)
+  --hostname NAME           LXC hostname (default: jellyfin)
+  --storage NAME            Proxmox rootfs storage (default: auto-detect)
+  --template-storage NAME   Proxmox template storage (default: auto-detect)
   --disk-gb GB              Root disk size in GB (default: 60)
   --cores COUNT             CPU cores (default: 2)
   --memory-mb MB            Memory in MB (default: 8000)
   --swap-mb MB              Swap in MB (default: 512)
   --template REF            Template ref or "auto" (default: auto Debian 13, fallback 12)
   --bridge NAME             Proxmox bridge (default: vmbr0)
-  --vlan ID                 VLAN tag (default: 6)
+  --vlan ID                 VLAN tag (default: untagged)
   --ip-config VALUE         Proxmox ip= value, e.g. dhcp or 192.168.1.50/24,gw=192.168.1.1
-  --nameserver IP           Container DNS server (default: 1.1.1.1)
+  --nameserver IP           Container DNS server (default: inherit from Proxmox)
+  --timezone ZONE           Container timezone (default: Proxmox host timezone)
 
 Storage:
-  --nas-export EXPORT       Required NFS export (default: nas.example.lan:/volume1/media)
-  --host-nas PATH           Host mount path passed to LXC /mnt/nas (default: /mnt/synology)
+  --nas-export EXPORT       Required NFS export; there is no environment-specific default
+  --host-nas PATH           Host mount path passed to LXC /mnt/nas (default: /mnt/jellyfin-media)
   --enable-qnap             Mount QNAP export and pass to LXC /mnt/qnap
-  --qnap-export EXPORT      QNAP NFS export (default: nas.example.lan:/share/media)
-  --host-qnap PATH          Host QNAP mount path (default: /mnt/qnap_media)
+  --qnap-export EXPORT      Required when --enable-qnap is used
+  --host-qnap PATH          Secondary host mount path (default: /mnt/jellyfin-media-secondary)
 
 GPU:
   --gpu VENDOR              GPU passthrough: auto, nvidia, amd, or off (default: auto)
@@ -112,7 +115,7 @@ Safety:
 
 Example:
   NORDVPN_USER='token-user' NORDVPN_PASS='token-pass' \
-    ./install-jellyfin-stack.sh --no-gui --storage local-lvm
+    ./install-jellyfin-stack.sh --no-gui --nas-export 192.168.1.10:/volume1/media
 
 Interactive setup:
   ./install-jellyfin-stack.sh
@@ -202,8 +205,54 @@ resolve_ctid() {
   [[ "$CTID" =~ ^[0-9]+$ ]] || die "Invalid CTID: ${CTID}. Use a number, auto, or next."
 }
 
+attach_ui_terminal() {
+  [[ "$GUI_MODE" != "off" ]] || return 0
+  [[ -t 0 && -t 1 ]] && return 0
+
+  # A common `curl | bash` bootstrap leaves the downloaded installer with pipe
+  # stdin even though the SSH/local terminal is still available. Reattach it so
+  # the guided installer cannot silently fall through to unattended defaults.
+  if { exec 9<>/dev/tty; } 2>/dev/null; then
+    exec <&9 >&9 2>&9
+    return 0
+  fi
+
+  die "No interactive terminal is available. Run from a terminal, or use --no-gui and provide every required setting explicitly."
+}
+
 use_whiptail() {
-  [[ "$GUI_MODE" != "off" && -t 0 && -t 1 && -n "${TERM:-}" ]] && command -v whiptail >/dev/null 2>&1
+  [[ "$GUI_MODE" != "off" && -t 0 && -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] &&
+    command -v whiptail >/dev/null 2>&1
+}
+
+prepare_terminal_ui() {
+  [[ "$GUI_MODE" != "off" ]] || return 0
+  attach_ui_terminal
+
+  if ! command -v whiptail >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" == "0" ]]; then
+      info "Installing whiptail for the guided setup UI"
+      if ! apt-get update || ! apt-get install -y whiptail; then
+        warn "Could not install whiptail; using plain terminal prompts."
+      fi
+    else
+      warn "whiptail is not installed; the dry run will use plain terminal prompts."
+    fi
+  fi
+
+  if use_whiptail; then
+    local choice=""
+    if ! choice="$(whiptail --backtitle "$UI_BACKTITLE" --title "SETTINGS" \
+      --menu "Choose an option:" 15 72 2 \
+      "1" "Guided setup (recommended)" \
+      "2" "Exit installer" \
+      3>&1 1>&2 2>&3)"; then
+      die "Setup cancelled."
+    fi
+    [[ "$choice" == "1" ]] || die "Setup cancelled."
+  else
+    warn "whiptail is unavailable in this terminal; using plain prompts."
+  fi
 }
 
 ui_input() {
@@ -213,7 +262,7 @@ ui_input() {
   local value=""
 
   if use_whiptail; then
-    if ! value="$(whiptail --title "$title" --inputbox "$prompt" 10 78 "$default" 3>&1 1>&2 2>&3)"; then
+    if ! value="$(whiptail --backtitle "$UI_BACKTITLE" --title "$title" --inputbox "$prompt" 10 78 "$default" 3>&1 1>&2 2>&3)"; then
       die "Setup cancelled."
     fi
   else
@@ -230,7 +279,7 @@ ui_password() {
   local value=""
 
   if use_whiptail; then
-    if ! value="$(whiptail --title "$title" --passwordbox "$prompt" 10 78 "$default" 3>&1 1>&2 2>&3)"; then
+    if ! value="$(whiptail --backtitle "$UI_BACKTITLE" --title "$title" --passwordbox "$prompt" 10 78 "$default" 3>&1 1>&2 2>&3)"; then
       die "Setup cancelled."
     fi
   else
@@ -249,7 +298,7 @@ ui_yesno() {
 
   if use_whiptail; then
     if [[ "$default" == "yes" ]]; then
-      if whiptail --title "$title" --yesno "$prompt" 10 78 3>&1 1>&2 2>&3; then
+      if whiptail --backtitle "$UI_BACKTITLE" --title "$title" --yesno "$prompt" 10 78 3>&1 1>&2 2>&3; then
         return 0
       else
         result=$?
@@ -257,7 +306,7 @@ ui_yesno() {
       [[ "$result" == "1" ]] && return 1
       die "Setup cancelled."
     fi
-    if whiptail --defaultno --title "$title" --yesno "$prompt" 10 78 3>&1 1>&2 2>&3; then
+    if whiptail --backtitle "$UI_BACKTITLE" --defaultno --title "$title" --yesno "$prompt" 10 78 3>&1 1>&2 2>&3; then
       return 0
     else
       result=$?
@@ -278,7 +327,7 @@ ui_gpu_menu() {
   local value=""
 
   if use_whiptail; then
-    if ! value="$(whiptail --title "GPU Passthrough" --menu "Choose Jellyfin hardware transcoding." 15 78 4 \
+    if ! value="$(whiptail --backtitle "$UI_BACKTITLE" --title "GPU Passthrough" --menu "Choose Jellyfin hardware transcoding." 15 78 4 \
       auto "Detect NVIDIA, then AMD, else CPU-only" \
       nvidia "NVIDIA (NVENC/CUDA)" \
       amd "AMD (VAAPI)" \
@@ -302,7 +351,7 @@ ui_confirm() {
   local result=0
 
   if use_whiptail; then
-    if whiptail --title "Ready To Install" --yesno "$summary" 24 88 3>&1 1>&2 2>&3; then
+    if whiptail --backtitle "$UI_BACKTITLE" --title "Ready To Install" --yesno "$summary" 24 88 3>&1 1>&2 2>&3; then
       return
     else
       result=$?
@@ -317,11 +366,7 @@ ui_confirm() {
 
 run_setup_ui() {
   [[ "$GUI_MODE" == "off" ]] && return
-  [[ "$GUI_MODE" == "auto" && ! -t 0 ]] && return
-
-  if ! use_whiptail; then
-    warn "whiptail not available; using plain terminal prompts."
-  fi
+  prepare_terminal_ui
 
   CTID="$(ui_input "Container ID" "Container ID. Leave as-is for the next free Proxmox ID." "$CTID")"
   resolve_ctid
@@ -332,17 +377,18 @@ run_setup_ui() {
   MEMORY_MB="$(ui_input "Memory" "Memory in MB" "$MEMORY_MB")"
   SWAP_MB="$(ui_input "Swap" "Swap in MB" "$SWAP_MB")"
   BRIDGE="$(ui_input "Network" "Bridge" "$BRIDGE")"
-  VLAN_TAG="$(ui_input "Network" "VLAN tag" "$VLAN_TAG")"
+  VLAN_TAG="$(ui_input "Network" "VLAN tag (leave blank for an untagged network)" "$VLAN_TAG")"
   IP_CONFIG="$(ui_input "Network" "Proxmox ip= value" "$IP_CONFIG")"
-  NAMESERVER="$(ui_input "DNS" "Container nameserver" "$NAMESERVER")"
+  NAMESERVER="$(ui_input "DNS" "Container nameserver (leave blank to inherit the Proxmox resolver)" "$NAMESERVER")"
+  TIMEZONE="$(ui_input "Timezone" "Container timezone" "$TIMEZONE")"
   APP_DIR="$(ui_input "App Path" "Media stack directory inside the LXC" "$APP_DIR")"
-  NAS_EXPORT="$(ui_input "Synology" "Required Synology NFS export" "$NAS_EXPORT")"
-  HOST_NAS="$(ui_input "Synology" "Proxmox host mount path for Synology" "$HOST_NAS")"
+  NAS_EXPORT="$(ui_input "Media Storage" "Required NFS export (for example 192.168.1.10:/volume1/media)" "$NAS_EXPORT")"
+  HOST_NAS="$(ui_input "Media Storage" "Proxmox host mount path for the primary NFS export" "$HOST_NAS")"
 
-  if ui_yesno "QNAP" "Enable QNAP NFS mount and /mnt/qnap bind?" "no"; then
+  if ui_yesno "Secondary NAS" "Enable a second NFS mount at /mnt/qnap?" "no"; then
     ENABLE_QNAP=1
-    QNAP_EXPORT="$(ui_input "QNAP" "QNAP NFS export" "$QNAP_EXPORT")"
-    HOST_QNAP="$(ui_input "QNAP" "Proxmox host mount path for QNAP" "$HOST_QNAP")"
+    QNAP_EXPORT="$(ui_input "Secondary NAS" "Secondary NFS export" "$QNAP_EXPORT")"
+    HOST_QNAP="$(ui_input "Secondary NAS" "Proxmox host mount path for the secondary export" "$HOST_QNAP")"
   else
     ENABLE_QNAP=0
   fi
@@ -382,9 +428,9 @@ CTID: ${CTID}
 Hostname: ${CT_HOSTNAME}
 Storage: ${ROOTFS_STORAGE}:${DISK_GB}G
 CPU/RAM/Swap: ${CORES} cores, ${MEMORY_MB} MB RAM, ${SWAP_MB} MB swap
-Network: ${BRIDGE}, VLAN ${VLAN_TAG}, ip=${IP_CONFIG}, DNS ${NAMESERVER}
-Synology: ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas
-QNAP: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
+Network: ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'), ip=${IP_CONFIG}, DNS $([[ -n "$NAMESERVER" ]] && printf '%s' "$NAMESERVER" || printf 'inherit host')
+Primary NFS: ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas
+Secondary NFS: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
 GPU: ${GPU_MODE}
 Start stack: $([[ "$START_STACK" == "1" ]] && printf 'yes' || printf 'no')
 Auto-configure apps/NAS: $([[ "$AUTO_CONFIGURE" == "1" ]] && printf 'yes' || printf 'no')
@@ -401,6 +447,7 @@ parse_args() {
       --nextid) CTID="auto"; shift ;;
       --hostname) CT_HOSTNAME="$2"; shift 2 ;;
       --storage) ROOTFS_STORAGE="$2"; shift 2 ;;
+      --template-storage) TEMPLATE_STORAGE="$2"; shift 2 ;;
       --disk-gb) DISK_GB="$2"; shift 2 ;;
       --cores) CORES="$2"; shift 2 ;;
       --memory-mb) MEMORY_MB="$2"; shift 2 ;;
@@ -410,6 +457,7 @@ parse_args() {
       --vlan) VLAN_TAG="$2"; shift 2 ;;
       --ip-config) IP_CONFIG="$2"; shift 2 ;;
       --nameserver) NAMESERVER="$2"; shift 2 ;;
+      --timezone) TIMEZONE="$2"; shift 2 ;;
       --nas-export) NAS_EXPORT="$2"; shift 2 ;;
       --host-nas) HOST_NAS="$2"; shift 2 ;;
       --enable-qnap) ENABLE_QNAP=1; shift ;;
@@ -446,6 +494,7 @@ preflight() {
   [[ "$(id -u)" == "0" ]] || die "Run this on the Proxmox host as root."
   command -v pct >/dev/null 2>&1 || die "pct not found. This needs to run on Proxmox VE."
   command -v pveam >/dev/null 2>&1 || die "pveam not found. This needs to run on Proxmox VE."
+  command -v pvesm >/dev/null 2>&1 || die "pvesm not found. This needs to run on Proxmox VE."
   [[ -f "$COMPOSE_SRC" ]] || die "Missing $COMPOSE_SRC"
   [[ -f "$NVIDIA_COMPOSE_SRC" ]] || die "Missing $NVIDIA_COMPOSE_SRC"
   [[ -f "$AMD_COMPOSE_SRC" ]] || die "Missing $AMD_COMPOSE_SRC"
@@ -458,6 +507,81 @@ preflight() {
   [[ -f "$PORTAL_SRC" ]] || die "Missing $PORTAL_SRC"
   [[ -z "$ENV_FILE" || -f "$ENV_FILE" ]] || die "Env file not found: $ENV_FILE"
   [[ -z "$SSH_PUBLIC_KEY_FILE" || -f "$SSH_PUBLIC_KEY_FILE" ]] || die "SSH public key file not found: $SSH_PUBLIC_KEY_FILE"
+}
+
+first_active_storage() {
+  local content="$1"
+  pvesm status --content "$content" 2>/dev/null |
+    awk 'NR > 1 && $3 == "active" { print $1 }'
+}
+
+resolve_platform_defaults() {
+  local available=""
+
+  if [[ "$ROOTFS_STORAGE" == "auto" ]]; then
+    available="$(first_active_storage rootdir)"
+    [[ -n "$available" ]] || die "No active Proxmox storage supports LXC root disks (content type: rootdir)."
+    if grep -Fxq "local-lvm" <<<"$available"; then
+      ROOTFS_STORAGE="local-lvm"
+    elif grep -Fxq "local-zfs" <<<"$available"; then
+      ROOTFS_STORAGE="local-zfs"
+    else
+      ROOTFS_STORAGE="$(head -n 1 <<<"$available")"
+    fi
+  fi
+
+  if [[ "$TEMPLATE_STORAGE" == "auto" ]]; then
+    available="$(first_active_storage vztmpl)"
+    [[ -n "$available" ]] || die "No active Proxmox storage supports container templates (content type: vztmpl)."
+    if grep -Fxq "local" <<<"$available"; then
+      TEMPLATE_STORAGE="local"
+    else
+      TEMPLATE_STORAGE="$(head -n 1 <<<"$available")"
+    fi
+  fi
+
+  if [[ "$TIMEZONE" == "auto" ]]; then
+    TIMEZONE="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+    [[ -n "$TIMEZONE" && "$TIMEZONE" != "n/a" ]] || TIMEZONE="$(cat /etc/timezone 2>/dev/null || true)"
+    TIMEZONE="${TIMEZONE:-UTC}"
+  fi
+}
+
+validate_integer() {
+  local label="$1"
+  local value="$2"
+  local minimum="$3"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "${label} must be an integer (got '${value}')."
+  (( 10#$value >= minimum )) || die "${label} must be at least ${minimum} (got '${value}')."
+}
+
+validate_settings() {
+  validate_integer "Disk size" "$DISK_GB" 8
+  validate_integer "CPU cores" "$CORES" 1
+  validate_integer "Memory" "$MEMORY_MB" 512
+  validate_integer "Swap" "$SWAP_MB" 0
+
+  [[ -z "$VLAN_TAG" || "$VLAN_TAG" =~ ^[0-9]+$ ]] || die "VLAN must be blank or an integer from 1 to 4094."
+  if [[ -n "$VLAN_TAG" ]]; then
+    (( 10#$VLAN_TAG >= 1 && 10#$VLAN_TAG <= 4094 )) || die "VLAN must be from 1 to 4094."
+  fi
+
+  [[ -n "$NAS_EXPORT" ]] || die "A primary NFS export is required. Rerun the guided setup or pass --nas-export server:/path."
+  [[ "$NAS_EXPORT" == *:* ]] || die "Invalid NFS export '${NAS_EXPORT}'. Expected server:/path."
+  [[ "$HOST_NAS" == /* ]] || die "Primary host mount path must be absolute (got '${HOST_NAS}')."
+  if [[ "$ENABLE_QNAP" == "1" ]]; then
+    [[ -n "$QNAP_EXPORT" && "$QNAP_EXPORT" == *:* ]] || die "--enable-qnap requires --qnap-export server:/path."
+    [[ "$HOST_QNAP" == /* ]] || die "Secondary host mount path must be absolute (got '${HOST_QNAP}')."
+  fi
+  [[ "$APP_DIR" == /* ]] || die "App path must be absolute (got '${APP_DIR}')."
+  [[ -n "$BRIDGE" ]] || die "A Proxmox bridge is required."
+  [[ -n "$IP_CONFIG" ]] || die "An IP configuration is required."
+  [[ -n "$TIMEZONE" ]] || die "A timezone is required."
+
+  first_active_storage rootdir | grep -Fxq "$ROOTFS_STORAGE" ||
+    die "Storage '${ROOTFS_STORAGE}' is not active or does not support LXC root disks."
+  first_active_storage vztmpl | grep -Fxq "$TEMPLATE_STORAGE" ||
+    die "Template storage '${TEMPLATE_STORAGE}' is not active or does not support container templates."
 }
 
 prepare_nfs_mount() {
@@ -515,7 +639,8 @@ resolve_template() {
 
 create_container() {
   local template_ref="$1"
-  local net0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG},tag=${VLAN_TAG},type=veth"
+  local net0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG},type=veth"
+  [[ -n "$VLAN_TAG" ]] && net0+=",tag=${VLAN_TAG}"
   local args=(
     pct create "$CTID" "$template_ref"
     --hostname "$CT_HOSTNAME"
@@ -527,13 +652,13 @@ create_container() {
     --swap "$SWAP_MB"
     --rootfs "${ROOTFS_STORAGE}:${DISK_GB}"
     --net0 "$net0"
-    --nameserver "$NAMESERVER"
     --timezone "$TIMEZONE"
     --onboot 1
     --start 0
-    --description "Docker LXC for Jellyfin media stack. Generated by homelab-docs scripts/proxmox/install-jellyfin-stack.sh."
+    --description "Docker LXC for the Jellyfin media stack."
   )
 
+  [[ -n "$NAMESERVER" ]] && args+=(--nameserver "$NAMESERVER")
   [[ -n "$ROOT_PASSWORD" ]] && args+=(--password "$ROOT_PASSWORD")
   [[ -n "$SSH_PUBLIC_KEY_FILE" ]] && args+=(--ssh-public-keys "$SSH_PUBLIC_KEY_FILE")
 
@@ -1025,16 +1150,18 @@ done
 main() {
   parse_args "$@"
   preflight
+  resolve_platform_defaults
   resolve_ctid
   run_setup_ui
   resolve_ctid
+  validate_settings
 
   info "Deploying Jellyfin/media stack to CT${CTID}"
-  prepare_nfs_mount "Synology media" "$NAS_EXPORT" "$HOST_NAS" 1
+  prepare_nfs_mount "primary media" "$NAS_EXPORT" "$HOST_NAS" 1
   if [[ "$ENABLE_QNAP" == "1" ]]; then
-    prepare_nfs_mount "QNAP media" "$QNAP_EXPORT" "$HOST_QNAP" 1
+    prepare_nfs_mount "secondary media" "$QNAP_EXPORT" "$HOST_QNAP" 1
   else
-    info "QNAP disabled; ${HOST_QNAP} will be an empty optional bind path"
+    info "Secondary NAS disabled; ${HOST_QNAP} will be an empty optional bind path"
     run mkdir -p "$HOST_QNAP"
   fi
 
