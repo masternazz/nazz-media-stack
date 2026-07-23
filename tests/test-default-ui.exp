@@ -1,0 +1,37 @@
+#!/usr/bin/expect -f
+set timeout 120
+
+if {$argc != 1} {
+  puts stderr "usage: test-default-ui.exp /path/to/install-jellyfin-stack.sh"
+  exit 2
+}
+
+set installer [lindex $argv 0]
+spawn env TERM=xterm-256color bash $installer --dry-run
+
+expect -re {Default Settings.*recommended}
+send -- "\r"
+
+expect -re {Primary NFS export}
+send -- "192.0.2.10:/media\r"
+
+expect -re {Enable a second NFS mount}
+send -- "\r"
+
+expect -re {Enter NordVPN manual-setup credentials}
+send -- "\r"
+
+expect -re {Admin username for Jellyfin}
+send -- "\r"
+
+expect -re {Admin password.*12\+ characters}
+send -- "\r"
+
+after 750
+send -- "\r"
+
+expect -re {Dry run completed successfully}
+expect eof
+
+set result [wait]
+exit [lindex $result 3]

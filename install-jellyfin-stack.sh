@@ -35,6 +35,8 @@ ENABLE_SUBTITLE_TIMER=1
 REPLACE=0
 DRY_RUN=0
 GUI_MODE="auto"
+SETTINGS_MODE="advanced"
+VERBOSE="${VERBOSE:-0}"
 ENV_FILE=""
 ROOT_PASSWORD=""
 SSH_PUBLIC_KEY_FILE=""
@@ -56,6 +58,11 @@ AMD_ACTIVE=0
 ENV_HAS_PLACEHOLDER=0
 RESOLVED_TEMPLATE_REF=""
 UI_BACKTITLE="Jellyfin Media Stack | Proxmox VE"
+LOG_FILE="${LOG_FILE:-}"
+PRETTY_OUTPUT=0
+CURRENT_STEP=""
+SPINNER_PID=""
+ERROR_HANDLED=0
 
 usage() {
   cat <<'EOF'
@@ -109,6 +116,7 @@ Stack/env:
 Safety:
   --gui                     Force the terminal setup UI
   --no-gui                  Skip the setup UI for automation
+  --verbose                 Show command output instead of the compact progress UI
   --replace                 Stop and destroy an existing CTID before creating it
   --dry-run                 Print commands without changing anything
   -h, --help                Show this help
@@ -128,9 +136,115 @@ After first boot, apps live on the LXC IP:
 EOF
 }
 
-info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+init_output() {
+  if [[ -z "$LOG_FILE" ]]; then
+    LOG_FILE="/tmp/jellyfin-media-stack-$(date +%Y%m%d-%H%M%S).log"
+  fi
+  : >"$LOG_FILE"
+  chmod 0600 "$LOG_FILE"
+
+  if [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]]; then
+    PRETTY_OUTPUT=1
+  fi
+}
+
+header_info() {
+  [[ "$PRETTY_OUTPUT" == "1" ]] || return 0
+  stop_spinner
+  clear 2>/dev/null || printf '\033[2J\033[H'
+  printf '\033[38;5;99m%s\033[0m\n' '     ╭────────────────────────────────────────────────────────────╮'
+  printf '\033[38;5;99m%s\033[0m\n' '     │                                                            │'
+  printf '\033[38;5;135m%s\033[0m\n' '     │              J E L L Y F I N   M E D I A                   │'
+  printf '\033[38;5;141m%s\033[0m\n' '     │                       S T A C K                            │'
+  printf '\033[38;5;99m%s\033[0m\n' '     │                                                            │'
+  printf '\033[38;5;45m%s\033[0m\n' '     │        Proxmox VE  •  Guided LXC Deployment                 │'
+  printf '\033[38;5;99m%s\033[0m\n' '     ╰────────────────────────────────────────────────────────────╯'
+  printf '\n'
+}
+
+spinner() {
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while :; do
+    printf '\r\033[2K  \033[38;5;141m%s\033[0m  %s' "${frames[$i]}" "$CURRENT_STEP" >&2
+    i=$(( (i + 1) % ${#frames[@]} ))
+    sleep 0.1
+  done
+}
+
+stop_spinner() {
+  if [[ -n "${SPINNER_PID:-}" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=""
+  fi
+}
+
+finish_step() {
+  [[ -n "$CURRENT_STEP" ]] || return 0
+  stop_spinner
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '\r\033[2K  \033[1;92m✔\033[0m  %s\n' "$CURRENT_STEP"
+  fi
+  CURRENT_STEP=""
+}
+
+fail_step() {
+  local message="$1"
+  stop_spinner
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '\r\033[2K  \033[1;91m✖\033[0m  %s\n' "${CURRENT_STEP:-$message}" >&2
+  fi
+  CURRENT_STEP=""
+}
+
+info() {
+  finish_step
+  CURRENT_STEP="$*"
+  if [[ "$PRETTY_OUTPUT" == "1" && "$VERBOSE" != "1" && "$DRY_RUN" != "1" ]]; then
+    spinner &
+    SPINNER_PID=$!
+  elif [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '  \033[1;94m●\033[0m  %s\n' "$*"
+  else
+    printf '==> %s\n' "$*"
+  fi
+}
+
+warn() {
+  finish_step
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '  \033[1;93m!\033[0m  %s\n' "$*" >&2
+  else
+    printf 'WARN: %s\n' "$*" >&2
+  fi
+}
+
+die() {
+  local message="$*"
+  fail_step "$message"
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '  \033[1;91mERROR\033[0m  %s\n' "$message" >&2
+    [[ -n "${LOG_FILE:-}" ]] && printf '  \033[38;5;245mLog: %s\033[0m\n' "$LOG_FILE" >&2
+  else
+    printf 'ERROR: %s\n' "$message" >&2
+  fi
+  exit 1
+}
+
+handle_error() {
+  local code="$1" line="$2" command_text="$3"
+  [[ "$ERROR_HANDLED" == "1" ]] && exit "$code"
+  ERROR_HANDLED=1
+  fail_step "Installation failed"
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '  \033[1;91mERROR\033[0m  Command failed on line %s (exit %s): %s\n' "$line" "$code" "$command_text" >&2
+    [[ -n "${LOG_FILE:-}" ]] && printf '  Log: %s\n' "$LOG_FILE" >&2
+  else
+    printf 'ERROR: command failed on line %s (exit %s): %s\n' "$line" "$code" "$command_text" >&2
+  fi
+  exit "$code"
+}
 
 run() {
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -138,7 +252,11 @@ run() {
     printf ' %q' "$@"
     printf '\n'
   else
-    "$@"
+    if [[ "$VERBOSE" == "1" ]]; then
+      "$@"
+    else
+      "$@" >>"$LOG_FILE" 2>&1
+    fi
   fi
 }
 
@@ -146,7 +264,11 @@ run_shell() {
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '[dry-run] bash -lc %q\n' "$1"
   else
-    bash -lc "$1"
+    if [[ "$VERBOSE" == "1" ]]; then
+      bash -lc "$1"
+    else
+      bash -lc "$1" >>"$LOG_FILE" 2>&1
+    fi
   fi
 }
 
@@ -155,7 +277,11 @@ pct_bash() {
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '[dry-run] pct exec %q -- bash -lc %q\n' "$CTID" "$script"
   else
-    pct exec "$CTID" -- bash -lc "$script"
+    if [[ "$VERBOSE" == "1" ]]; then
+      pct exec "$CTID" -- bash -lc "$script"
+    else
+      pct exec "$CTID" -- bash -lc "$script" >>"$LOG_FILE" 2>&1
+    fi
   fi
 }
 
@@ -214,6 +340,7 @@ attach_ui_terminal() {
   # the guided installer cannot silently fall through to unattended defaults.
   if { exec 9<>/dev/tty; } 2>/dev/null; then
     exec <&9 >&9 2>&9
+    PRETTY_OUTPUT=1
     return 0
   fi
 
@@ -221,7 +348,9 @@ attach_ui_terminal() {
 }
 
 use_whiptail() {
-  [[ "$GUI_MODE" != "off" && -t 0 && -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] &&
+  # ui_input/ui_password run inside command substitutions, where stdout is a
+  # capture pipe even though stdin is still the controlling terminal.
+  [[ "$GUI_MODE" != "off" && -t 0 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] &&
     command -v whiptail >/dev/null 2>&1
 }
 
@@ -232,7 +361,7 @@ prepare_terminal_ui() {
   if ! command -v whiptail >/dev/null 2>&1; then
     if [[ "$DRY_RUN" == "0" ]]; then
       info "Installing whiptail for the guided setup UI"
-      if ! apt-get update || ! apt-get install -y whiptail; then
+      if ! run apt-get update || ! run apt-get install -y whiptail; then
         warn "Could not install whiptail; using plain terminal prompts."
       fi
     else
@@ -240,18 +369,42 @@ prepare_terminal_ui() {
     fi
   fi
 
+  finish_step
+  header_info
+
   if use_whiptail; then
     local choice=""
     if ! choice="$(whiptail --backtitle "$UI_BACKTITLE" --title "SETTINGS" \
-      --menu "Choose an option:" 15 72 2 \
-      "1" "Guided setup (recommended)" \
-      "2" "Exit installer" \
+      --menu "Choose an installation mode:" 18 72 4 \
+      "1" "Default Settings (recommended)" \
+      "2" "Default Settings (with verbose output)" \
+      "3" "Advanced Settings" \
+      "4" "Exit installer" \
       3>&1 1>&2 2>&3)"; then
       die "Setup cancelled."
     fi
-    [[ "$choice" == "1" ]] || die "Setup cancelled."
+    case "$choice" in
+      1) SETTINGS_MODE="default" ;;
+      2) SETTINGS_MODE="default"; VERBOSE=1 ;;
+      3) SETTINGS_MODE="advanced" ;;
+      *) die "Setup cancelled." ;;
+    esac
   else
     warn "whiptail is unavailable in this terminal; using plain prompts."
+    local choice=""
+    read -r -p "Installation mode: [1] Default, [2] Default verbose, [3] Advanced, [4] Exit [1]: " choice
+    case "${choice:-1}" in
+      1) SETTINGS_MODE="default" ;;
+      2) SETTINGS_MODE="default"; VERBOSE=1 ;;
+      3) SETTINGS_MODE="advanced" ;;
+      *) die "Setup cancelled." ;;
+    esac
+  fi
+
+  if [[ "$SETTINGS_MODE" == "default" ]]; then
+    UI_BACKTITLE="Jellyfin Media Stack | Proxmox VE | Default Settings"
+  else
+    UI_BACKTITLE="Jellyfin Media Stack | Proxmox VE | Advanced Settings"
   fi
 }
 
@@ -288,6 +441,31 @@ ui_password() {
   fi
 
   printf '%s\n' "${value:-$default}"
+}
+
+ui_message() {
+  local title="$1"
+  local message="$2"
+  if use_whiptail; then
+    whiptail --backtitle "$UI_BACKTITLE" --title "$title" --msgbox "$message" 11 78 || die "Setup cancelled."
+  else
+    printf '\n%s: %s\n\n' "$title" "$message" >&2
+  fi
+}
+
+ui_required_input() {
+  local title="$1"
+  local prompt="$2"
+  local default="${3:-}"
+  local value=""
+  while :; do
+    value="$(ui_input "$title" "$prompt" "$default")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return
+    fi
+    ui_message "Required Setting" "${title} cannot be blank."
+  done
 }
 
 ui_yesno() {
@@ -364,43 +542,76 @@ ui_confirm() {
   ui_yesno "Ready To Install" "Continue with these settings?" "yes" || die "Setup cancelled."
 }
 
-run_setup_ui() {
-  [[ "$GUI_MODE" == "off" ]] && return
-  prepare_terminal_ui
-
-  CTID="$(ui_input "Container ID" "Container ID. Leave as-is for the next free Proxmox ID." "$CTID")"
-  resolve_ctid
-  CT_HOSTNAME="$(ui_input "Hostname" "LXC hostname" "$CT_HOSTNAME")"
-  ROOTFS_STORAGE="$(ui_input "Root Storage" "Proxmox rootfs storage" "$ROOTFS_STORAGE")"
-  DISK_GB="$(ui_input "Disk" "Root disk size in GB" "$DISK_GB")"
-  CORES="$(ui_input "CPU" "CPU cores" "$CORES")"
-  MEMORY_MB="$(ui_input "Memory" "Memory in MB" "$MEMORY_MB")"
-  SWAP_MB="$(ui_input "Swap" "Swap in MB" "$SWAP_MB")"
-  BRIDGE="$(ui_input "Network" "Bridge" "$BRIDGE")"
-  VLAN_TAG="$(ui_input "Network" "VLAN tag (leave blank for an untagged network)" "$VLAN_TAG")"
-  IP_CONFIG="$(ui_input "Network" "Proxmox ip= value" "$IP_CONFIG")"
-  NAMESERVER="$(ui_input "DNS" "Container nameserver (leave blank to inherit the Proxmox resolver)" "$NAMESERVER")"
-  TIMEZONE="$(ui_input "Timezone" "Container timezone" "$TIMEZONE")"
-  APP_DIR="$(ui_input "App Path" "Media stack directory inside the LXC" "$APP_DIR")"
-  NAS_EXPORT="$(ui_input "Media Storage" "Required NFS export (for example 192.168.1.10:/volume1/media)" "$NAS_EXPORT")"
-  HOST_NAS="$(ui_input "Media Storage" "Proxmox host mount path for the primary NFS export" "$HOST_NAS")"
-
-  if ui_yesno "Secondary NAS" "Enable a second NFS mount at /mnt/qnap?" "no"; then
+collect_secondary_nas() {
+  local default_choice="no"
+  [[ "$ENABLE_QNAP" == "1" ]] && default_choice="yes"
+  if ui_yesno "Secondary NAS" "Enable a second NFS mount at /mnt/qnap?" "$default_choice"; then
     ENABLE_QNAP=1
-    QNAP_EXPORT="$(ui_input "Secondary NAS" "Secondary NFS export" "$QNAP_EXPORT")"
-    HOST_QNAP="$(ui_input "Secondary NAS" "Proxmox host mount path for the secondary export" "$HOST_QNAP")"
+    QNAP_EXPORT="$(ui_required_input "Secondary NAS" "Secondary NFS export (server:/path)" "$QNAP_EXPORT")"
+    HOST_QNAP="$(ui_required_input "Secondary NAS" "Proxmox host mount path for the secondary export" "$HOST_QNAP")"
   else
     ENABLE_QNAP=0
   fi
+}
 
+collect_default_settings() {
+  NAS_EXPORT="$(ui_required_input "Media Storage" "Primary NFS export (for example 192.168.1.10:/volume1/media)" "$NAS_EXPORT")"
+  collect_secondary_nas
+  GPU_MODE="auto"
+  START_STACK=1
+  AUTO_CONFIGURE=1
+  APPLY_TRASH=1
+  ENABLE_SUBTITLE_TIMER=1
+}
+
+collect_advanced_settings() {
+  CTID="$(ui_input "Container ID" "Container ID. Leave as-is for the next free Proxmox ID." "$CTID")"
+  resolve_ctid
+  CT_HOSTNAME="$(ui_required_input "Hostname" "LXC hostname" "$CT_HOSTNAME")"
+  ROOTFS_STORAGE="$(ui_required_input "Root Storage" "Proxmox rootfs storage" "$ROOTFS_STORAGE")"
+  TEMPLATE_STORAGE="$(ui_required_input "Template Storage" "Proxmox template storage" "$TEMPLATE_STORAGE")"
+  TEMPLATE="$(ui_required_input "Debian Template" "Template name/ref, or auto" "$TEMPLATE")"
+  DISK_GB="$(ui_required_input "Disk" "Root disk size in GB" "$DISK_GB")"
+  CORES="$(ui_required_input "CPU" "CPU cores" "$CORES")"
+  MEMORY_MB="$(ui_required_input "Memory" "Memory in MB" "$MEMORY_MB")"
+  SWAP_MB="$(ui_required_input "Swap" "Swap in MB" "$SWAP_MB")"
+  BRIDGE="$(ui_required_input "Network" "Proxmox bridge" "$BRIDGE")"
+  VLAN_TAG="$(ui_input "Network" "VLAN tag (leave blank for an untagged network)" "$VLAN_TAG")"
+  IP_CONFIG="$(ui_required_input "Network" "Proxmox ip= value" "$IP_CONFIG")"
+  NAMESERVER="$(ui_input "DNS" "Nameserver (leave blank to inherit the Proxmox resolver)" "$NAMESERVER")"
+  TIMEZONE="$(ui_required_input "Timezone" "Container timezone" "$TIMEZONE")"
+  APP_DIR="$(ui_required_input "App Path" "Media stack directory inside the LXC" "$APP_DIR")"
+  NAS_EXPORT="$(ui_required_input "Media Storage" "Primary NFS export (server:/path)" "$NAS_EXPORT")"
+  HOST_NAS="$(ui_required_input "Media Storage" "Proxmox host mount path for the primary export" "$HOST_NAS")"
+  collect_secondary_nas
   GPU_MODE="$(ui_gpu_menu)"
 
-  if ui_yesno "Start Stack" "Pull images and start Docker Compose after install?" "yes"; then
+  if ui_yesno "Start Stack" "Pull images and start Docker Compose after install?" "$([[ "$START_STACK" == "1" ]] && printf yes || printf no)"; then
     START_STACK=1
   else
     START_STACK=0
   fi
 
+  if [[ "$START_STACK" == "1" ]] && ui_yesno "Automatic Setup" "Configure and connect the media applications automatically?" "$([[ "$AUTO_CONFIGURE" == "1" ]] && printf yes || printf no)"; then
+    AUTO_CONFIGURE=1
+  else
+    AUTO_CONFIGURE=0
+  fi
+
+  if [[ "$AUTO_CONFIGURE" == "1" ]] && ui_yesno "TRaSH Profiles" "Apply the default Recyclarr TRaSH profiles?" "$([[ "$APPLY_TRASH" == "1" ]] && printf yes || printf no)"; then
+    APPLY_TRASH=1
+  else
+    APPLY_TRASH=0
+  fi
+
+  if [[ "$AUTO_CONFIGURE" == "1" ]] && ui_yesno "Subtitle Repair" "Enable the safe weekly subtitle repair timer?" "$([[ "$ENABLE_SUBTITLE_TIMER" == "1" ]] && printf yes || printf no)"; then
+    ENABLE_SUBTITLE_TIMER=1
+  else
+    ENABLE_SUBTITLE_TIMER=0
+  fi
+}
+
+collect_login_settings() {
   if pct status "$CTID" >/dev/null 2>&1; then
     if ui_yesno "Existing CT${CTID}" "CT${CTID} already exists. Destroy and replace it?" "no"; then
       REPLACE=1
@@ -409,34 +620,75 @@ run_setup_ui() {
     fi
   fi
 
-  if ui_yesno "NordVPN" "Enter NordVPN manual-setup credentials now?" "no"; then
-    NORDVPN_USER="$(ui_input "NordVPN" "NordVPN manual-setup username" "${NORDVPN_USER:-}")"
+  if ui_yesno "NordVPN" "Enter NordVPN manual-setup credentials now? Without them, the stack files are installed but containers will not start." "no"; then
+    NORDVPN_USER="$(ui_required_input "NordVPN" "NordVPN manual-setup username" "${NORDVPN_USER:-}")"
     NORDVPN_PASS="$(ui_password "NordVPN" "NordVPN manual-setup password" "${NORDVPN_PASS:-}")"
+    [[ -n "$NORDVPN_PASS" ]] || ui_message "VPN Password Missing" "The stack will remain stopped until NORDVPN_PASS is added to ${APP_DIR}/.env."
     export NORDVPN_USER NORDVPN_PASS
   fi
 
-  MEDIASTACK_ADMIN_USER="$(ui_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
+  MEDIASTACK_ADMIN_USER="$(ui_required_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
   MEDIASTACK_ADMIN_PASSWORD="$(ui_password "Shared Admin Login" "Admin password (12+ characters). Leave blank to generate one." "$MEDIASTACK_ADMIN_PASSWORD")"
   if [[ -n "$MEDIASTACK_ADMIN_PASSWORD" && ${#MEDIASTACK_ADMIN_PASSWORD} -lt 12 ]]; then
-    die "The shared admin password must be at least 12 characters for Portainer."
+    ui_message "Invalid Password" "The shared admin password must be at least 12 characters. Leave it blank to generate a strong password."
+    MEDIASTACK_ADMIN_PASSWORD=""
   fi
+}
 
-  local summary
-  summary="Install Jellyfin/media stack with these settings:
+settings_summary() {
+  local mode_label="${SETTINGS_MODE^}"
+  [[ "$VERBOSE" == "1" ]] && mode_label+=" (verbose)"
+  cat <<EOF
+Install Jellyfin Media Stack with these settings:
 
-CTID: ${CTID}
-Hostname: ${CT_HOSTNAME}
-Storage: ${ROOTFS_STORAGE}:${DISK_GB}G
-CPU/RAM/Swap: ${CORES} cores, ${MEMORY_MB} MB RAM, ${SWAP_MB} MB swap
-Network: ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'), ip=${IP_CONFIG}, DNS $([[ -n "$NAMESERVER" ]] && printf '%s' "$NAMESERVER" || printf 'inherit host')
+Mode: ${mode_label}
+CTID / Hostname: ${CTID} / ${CT_HOSTNAME}
+Root storage: ${ROOTFS_STORAGE}:${DISK_GB}G
+Template storage: ${TEMPLATE_STORAGE}
+CPU / RAM / Swap: ${CORES} cores / ${MEMORY_MB} MB / ${SWAP_MB} MB
+Network: ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'), ip=${IP_CONFIG}
+DNS / Timezone: $([[ -n "$NAMESERVER" ]] && printf '%s' "$NAMESERVER" || printf 'inherit host') / ${TIMEZONE}
 Primary NFS: ${NAS_EXPORT} -> ${HOST_NAS} -> /mnt/nas
 Secondary NFS: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "$QNAP_EXPORT" "$HOST_QNAP" || printf 'disabled')
 GPU: ${GPU_MODE}
-Start stack: $([[ "$START_STACK" == "1" ]] && printf 'yes' || printf 'no')
-Auto-configure apps/NAS: $([[ "$AUTO_CONFIGURE" == "1" ]] && printf 'yes' || printf 'no')
+Start / Auto-configure: $([[ "$START_STACK" == "1" ]] && printf yes || printf no) / $([[ "$AUTO_CONFIGURE" == "1" ]] && printf yes || printf no)
 Shared admin user: ${MEDIASTACK_ADMIN_USER}
-Replace existing CT: $([[ "$REPLACE" == "1" ]] && printf 'yes' || printf 'no')"
+Replace existing CT: $([[ "$REPLACE" == "1" ]] && printf yes || printf no)
+EOF
+}
 
+show_install_plan() {
+  local summary
+  summary="$(settings_summary)"
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    header_info
+    printf '  \033[1;97mInstallation plan\033[0m\n'
+    printf '  \033[38;5;99m──────────────────────────────────────────────────────────────\033[0m\n'
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && printf '  \033[38;5;250m%s\033[0m\n' "$line"
+    done <<<"$summary"
+    printf '  \033[38;5;99m──────────────────────────────────────────────────────────────\033[0m\n\n'
+  else
+    printf '%s\n\n' "$summary"
+  fi
+}
+
+run_setup_ui() {
+  if [[ "$GUI_MODE" == "off" ]]; then
+    SETTINGS_MODE="unattended"
+    return
+  fi
+
+  prepare_terminal_ui
+  if [[ "$SETTINGS_MODE" == "default" ]]; then
+    collect_default_settings
+  else
+    collect_advanced_settings
+  fi
+  collect_login_settings
+
+  local summary
+  summary="$(settings_summary)"
   ui_confirm "$summary"
 }
 
@@ -482,6 +734,7 @@ parse_args() {
       --ssh-public-key-file) SSH_PUBLIC_KEY_FILE="$2"; shift 2 ;;
       --gui) GUI_MODE="on"; shift ;;
       --no-gui) GUI_MODE="off"; shift ;;
+      --verbose) VERBOSE=1; shift ;;
       --replace) REPLACE=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -1147,14 +1400,55 @@ done
   fi
 }
 
+show_completion() {
+  local lxc_ip=""
+  local portal="not started"
+  local completion_label="Completed successfully!"
+  [[ "$DRY_RUN" == "1" ]] && completion_label="Dry run completed successfully!"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    lxc_ip="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" && -n "$lxc_ip" ]]; then
+    portal="http://${lxc_ip}:8088"
+  fi
+
+  finish_step
+  if [[ "$PRETTY_OUTPUT" == "1" ]]; then
+    printf '\n'
+    printf '  \033[38;5;99m╭──────────────────────────────────────────────────────────────╮\033[0m\n'
+    printf '  \033[38;5;99m│\033[0m  \033[1;92m✔  %-55s\033[0m\033[38;5;99m│\033[0m\n' "$completion_label"
+    printf '  \033[38;5;99m├──────────────────────────────────────────────────────────────┤\033[0m\n'
+    printf '  \033[38;5;99m│\033[0m  LXC             \033[1;97mCT%-5s %-42s\033[0m\033[38;5;99m│\033[0m\n' "$CTID" "(${CT_HOSTNAME})"
+    printf '  \033[38;5;99m│\033[0m  Compose path    \033[38;5;45m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$APP_DIR"
+    printf '  \033[38;5;99m│\033[0m  Media Stack UI  \033[38;5;45m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$portal"
+    printf '  \033[38;5;99m│\033[0m  Install log     \033[38;5;245m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$LOG_FILE"
+    printf '  \033[38;5;99m╰──────────────────────────────────────────────────────────────╯\033[0m\n'
+    if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" ]]; then
+      printf '\n  \033[1;97mShared login\033[0m  %s / %s\n' "$MEDIASTACK_ADMIN_USER" "$MEDIASTACK_ADMIN_PASSWORD"
+      printf '  \033[38;5;245mCredentials are also stored in %s/.env inside CT%s (mode 0600).\033[0m\n' "$APP_DIR" "$CTID"
+    fi
+    printf '  \033[38;5;245mOnly expose reviewed media ports; keep admin applications internal.\033[0m\n\n'
+  else
+    printf '%s CT%s (%s)\n' "$completion_label" "$CTID" "$CT_HOSTNAME"
+    printf 'Compose path: %s\n' "$APP_DIR"
+    printf 'Media Stack UI: %s\n' "$portal"
+    printf 'Install log: %s\n' "$LOG_FILE"
+  fi
+}
+
 main() {
   parse_args "$@"
+  init_output
+  trap 'handle_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+  trap 'stop_spinner' EXIT
+  trap 'stop_spinner; exit 130' INT TERM
   preflight
   resolve_platform_defaults
   resolve_ctid
   run_setup_ui
   resolve_ctid
   validate_settings
+  show_install_plan
 
   info "Deploying Jellyfin/media stack to CT${CTID}"
   prepare_nfs_mount "primary media" "$NAS_EXPORT" "$HOST_NAS" 1
@@ -1179,18 +1473,7 @@ main() {
   configure_stack
   enable_subtitle_repair_timer
   verify_stack
-
-  info "Done. LXC: CT${CTID} (${CT_HOSTNAME})"
-  info "Compose path: ${APP_DIR}"
-  if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" ]]; then
-    local lxc_ip
-    lxc_ip="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)"
-    [[ -n "$lxc_ip" ]] && info "Open Media Stack Home: http://${lxc_ip}:8088"
-    info "Shared admin username: ${MEDIASTACK_ADMIN_USER}"
-    info "Shared admin password: ${MEDIASTACK_ADMIN_PASSWORD}"
-    info "Credentials are also stored in ${APP_DIR}/.env inside CT${CTID} (mode 0600)."
-  fi
-  info "If you reverse-proxy this stack, expose only reviewed ports and keep admin apps internal."
+  show_completion
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

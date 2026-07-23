@@ -84,11 +84,22 @@ bash -c "$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   https://raw.githubusercontent.com/masternazz/nazz-media-stack/main/install.sh)"
 ```
 
-Running with no flags launches a guided terminal UI (whiptail) that prompts for
-container ID, storage, network, NAS export, GPU mode, and the shared admin login.
-The installer reattaches to the controlling terminal when the bootstrap itself
-was piped into Bash, so the setup UI is not silently skipped. If no terminal is
-available, it stops safely and requires an explicit `--no-gui` unattended run.
+Running with no flags launches the Proxmox-style terminal installer. It has a
+branded header and the familiar settings menu:
+
+- **Default Settings** uses detected Proxmox storage/timezone, untagged DHCP,
+  automatic GPU selection, and the standard resource allocation. It asks only
+  for the required NFS export plus stack credentials.
+- **Default Settings (verbose)** uses the same answers and shows command output.
+- **Advanced Settings** walks through container, template, resource, network,
+  storage, GPU, and application options.
+
+Normal installs hide noisy package output behind animated status messages and
+green completion checks. Full output remains in a protected
+`/tmp/jellyfin-media-stack-*.log` file, and `--verbose` exposes it live. The
+installer reattaches to the controlling terminal when the bootstrap was piped
+into Bash, so whiptail is not silently skipped. If no terminal is available,
+it stops safely and requires an explicit `--no-gui` unattended run.
 
 ### Unattended install
 
