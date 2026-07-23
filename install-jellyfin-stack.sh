@@ -53,6 +53,7 @@ AMD_COMPOSE_SRC="${STACK_ASSET_DIR}/docker-compose.amd.yml"
 ENV_EXAMPLE_SRC="${STACK_ASSET_DIR}/.env.example"
 CONFIGURE_SRC="${STACK_ASSET_DIR}/configure-media-stack.sh"
 VERIFY_SRC="${STACK_ASSET_DIR}/verify-media-stack.sh"
+FINISH_SETUP_SRC="${STACK_ASSET_DIR}/finish-media-stack-setup.sh"
 FIX_SUBTITLES_SRC="${STACK_ASSET_DIR}/fix-subtitles.sh"
 FIX_SUBTITLES_SERVICE_SRC="${STACK_ASSET_DIR}/fix-subtitles.service"
 FIX_SUBTITLES_TIMER_SRC="${STACK_ASSET_DIR}/fix-subtitles.timer"
@@ -469,6 +470,11 @@ ui_shared_password() {
       default=""
       continue
     fi
+    if [[ ! "$password" =~ ^[[:alnum:]_.@%+=:,!~/-]+$ ]]; then
+      ui_message "Unsupported Password Character" "For reliable Docker application logins, use letters, numbers, or: . _ @ % + = : , ! ~ / -"
+      default=""
+      continue
+    fi
 
     confirmation="$(ui_password "Confirm Login Password" "Enter the same password again." "")"
     if [[ "$password" != "$confirmation" ]]; then
@@ -744,14 +750,14 @@ collect_login_settings() {
     fi
   fi
 
-  if ui_yesno "NordVPN" "Enter NordVPN manual-setup credentials now? Without them, the stack files are installed but containers will not start." "no"; then
+  if ui_yesno "NordVPN" "Enter NordVPN manual-setup credentials now? Without them, core apps are configured now and VPN downloads can be finished later." "no"; then
     NORDVPN_USER="$(ui_required_input "NordVPN" "NordVPN manual-setup username" "${NORDVPN_USER:-}")"
     NORDVPN_PASS="$(ui_password "NordVPN" "NordVPN manual-setup password" "${NORDVPN_PASS:-}")"
-    [[ -n "$NORDVPN_PASS" ]] || ui_message "VPN Password Missing" "The stack will remain stopped until NORDVPN_PASS is added to ${APP_DIR}/.env."
+    [[ -n "$NORDVPN_PASS" ]] || ui_message "VPN Password Missing" "Core apps will still be configured. Gluetun and qBittorrent will remain stopped until NORDVPN_PASS is added to ${APP_DIR}/.env and mediastack-finish-setup is run."
     export NORDVPN_USER NORDVPN_PASS
   fi
 
-  MEDIASTACK_ADMIN_USER="$(ui_required_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
+  MEDIASTACK_ADMIN_USER="$(ui_required_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, Homarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
   MEDIASTACK_ADMIN_PASSWORD="$(ui_shared_password "$MEDIASTACK_ADMIN_PASSWORD")"
   resolve_login_credentials
 }
@@ -892,6 +898,7 @@ preflight() {
   [[ -f "$ENV_EXAMPLE_SRC" ]] || die "Missing $ENV_EXAMPLE_SRC"
   [[ -f "$CONFIGURE_SRC" ]] || die "Missing $CONFIGURE_SRC"
   [[ -f "$VERIFY_SRC" ]] || die "Missing $VERIFY_SRC"
+  [[ -f "$FINISH_SETUP_SRC" ]] || die "Missing $FINISH_SETUP_SRC"
   [[ -f "$FIX_SUBTITLES_SRC" ]] || die "Missing $FIX_SUBTITLES_SRC"
   [[ -f "$FIX_SUBTITLES_SERVICE_SRC" ]] || die "Missing $FIX_SUBTITLES_SERVICE_SRC"
   [[ -f "$FIX_SUBTITLES_TIMER_SRC" ]] || die "Missing $FIX_SUBTITLES_TIMER_SRC"
@@ -1084,15 +1091,19 @@ resolve_login_credentials() {
 
   if [[ -n "$ENV_FILE" ]]; then
     existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_USER=/{value=substr($0,index($0,"=")+1)} END{print value}' "$ENV_FILE")"
-    [[ -n "$existing_value" ]] && MEDIASTACK_ADMIN_USER="$existing_value"
+    [[ -n "$existing_value" && "$existing_value" != CHANGE_ME* ]] && MEDIASTACK_ADMIN_USER="$existing_value"
     existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_PASSWORD=/{value=substr($0,index($0,"=")+1)} END{print value}' "$ENV_FILE")"
-    [[ -n "$existing_value" ]] && MEDIASTACK_ADMIN_PASSWORD="$existing_value"
+    [[ -n "$existing_value" && "$existing_value" != CHANGE_ME* ]] && MEDIASTACK_ADMIN_PASSWORD="$existing_value"
   fi
 
+  [[ "$MEDIASTACK_ADMIN_USER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$ ]] ||
+    die "The shared admin username must be 3-32 characters using letters, numbers, dot, underscore, or hyphen."
   [[ -n "$MEDIASTACK_ADMIN_PASSWORD" ]] ||
     MEDIASTACK_ADMIN_PASSWORD="$(rand_hex 18)"
   [[ ${#MEDIASTACK_ADMIN_PASSWORD} -ge 12 ]] ||
     die "The shared admin password must be at least 12 characters."
+  [[ "$MEDIASTACK_ADMIN_PASSWORD" =~ ^[[:alnum:]_.@%+=:,!~/-]+$ ]] ||
+    die "The shared admin password contains characters that Docker .env files cannot preserve safely. Use letters, numbers, or . _ @ % + = : , ! ~ / -"
 
   # A usable console login is part of every install. The CLI can still provide
   # a separate root password explicitly with --root-password.
@@ -1618,16 +1629,44 @@ push_stack_files() {
   run pct push "$CTID" "$ENV_EXAMPLE_SRC" "${APP_DIR}/.env.example" --perms 0644
   run pct push "$CTID" "$CONFIGURE_SRC" "${APP_DIR}/configure-media-stack.sh" --perms 0755
   run pct push "$CTID" "$VERIFY_SRC" "${APP_DIR}/verify-media-stack.sh" --perms 0755
+  run pct push "$CTID" "$FINISH_SETUP_SRC" "${APP_DIR}/finish-media-stack-setup.sh" --perms 0755
   run pct push "$CTID" "$FIX_SUBTITLES_SRC" "${APP_DIR}/fix-subtitles.sh" --perms 0755
   run pct push "$CTID" "$FIX_SUBTITLES_SERVICE_SRC" "${APP_DIR}/fix-subtitles.service" --perms 0644
   run pct push "$CTID" "$FIX_SUBTITLES_TIMER_SRC" "${APP_DIR}/fix-subtitles.timer" --perms 0644
   run pct push "$CTID" "$PORTAL_SRC" "${APP_DIR}/portal/index.html" --perms 0644
+  pct_bash "ln -sfn '${APP_DIR}/finish-media-stack-setup.sh' /usr/local/sbin/mediastack-finish-setup"
 }
 
 ensure_env_entry() {
   local file="$1" key="$2" value="$3"
   if ! grep -qE "^${key}=" "$file"; then
     printf '%s=%s\n' "$key" "$value" >>"$file"
+  fi
+}
+
+set_env_entry() {
+  local file="$1" key="$2" value="$3" rewritten
+  rewritten="${file}.rewrite.$$"
+  awk -v key="$key" -v value="$value" '
+    index($0, key "=") == 1 {
+      if (!written) print key "=" value
+      written = 1
+      next
+    }
+    { print }
+    END {
+      if (!written) print key "=" value
+    }
+  ' "$file" >"$rewritten"
+  chmod --reference="$file" "$rewritten"
+  mv -f "$rewritten" "$file"
+}
+
+ensure_env_secret() {
+  local file="$1" key="$2" value="$3" existing
+  existing="$(awk -v key="$key" 'index($0, key "=") == 1 { value=substr($0,length(key)+2) } END { print value }' "$file")"
+  if [[ -z "$existing" || "$existing" == CHANGE_ME* ]]; then
+    set_env_entry "$file" "$key" "$value"
   fi
 }
 
@@ -1643,9 +1682,9 @@ write_env_file() {
     info "Using env file: ${ENV_FILE}"
     cp "$ENV_FILE" "$tmp_env"
     existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_USER=/{value=substr($0,index($0,"=")+1)} END{print value}' "$tmp_env")"
-    [[ -n "$existing_value" ]] && shared_admin_user="$existing_value"
+    [[ -n "$existing_value" && "$existing_value" != CHANGE_ME* ]] && shared_admin_user="$existing_value"
     existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_PASSWORD=/{value=substr($0,index($0,"=")+1)} END{print value}' "$tmp_env")"
-    [[ -n "$existing_value" ]] && shared_admin_password="$existing_value"
+    [[ -n "$existing_value" && "$existing_value" != CHANGE_ME* ]] && shared_admin_password="$existing_value"
   else
     info "Generating ${APP_DIR}/.env"
     cat >"$tmp_env" <<EOF
@@ -1668,6 +1707,8 @@ FIREWALL_OUTBOUND_SUBNETS=${FIREWALL_OUTBOUND_SUBNETS:-192.168.0.0/16,172.16.0.0
 JELLYSTAT_DB_PASS=${JELLYSTAT_DB_PASS:-$(rand_hex 24)}
 JELLYSTAT_JWT_SECRET=${JELLYSTAT_JWT_SECRET:-$(rand_hex 32)}
 HOMARR_SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_ENCRYPTION_KEY:-$(rand_hex 32)}
+HOMARR_ADMIN_USER=${HOMARR_ADMIN_USER:-${shared_admin_user}}
+HOMARR_ADMIN_PASSWORD=${HOMARR_ADMIN_PASSWORD:-${shared_admin_password}}
 QBITTORRENT_USER=${QBITTORRENT_USER:-${shared_admin_user}}
 QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:-${shared_admin_password}}
 JELLYFIN_ADMIN_USER=${JELLYFIN_ADMIN_USER:-${shared_admin_user}}
@@ -1676,6 +1717,9 @@ PROFILARR_ADMIN_USER=${PROFILARR_ADMIN_USER:-${shared_admin_user}}
 PROFILARR_ADMIN_PASSWORD=${PROFILARR_ADMIN_PASSWORD:-${shared_admin_password}}
 PORTAINER_ADMIN_USER=${PORTAINER_ADMIN_USER:-${shared_admin_user}}
 PORTAINER_ADMIN_PASSWORD=${PORTAINER_ADMIN_PASSWORD:-${shared_admin_password}}
+QNAP_ENABLED=${ENABLE_QNAP}
+APPLY_TRASH=${APPLY_TRASH}
+SUBTITLE_REPAIR_TIMER_ENABLED=${ENABLE_SUBTITLE_TIMER}
 EOF
   fi
 
@@ -1687,23 +1731,28 @@ EOF
   ensure_env_entry "$tmp_env" TZ "$TIMEZONE"
   ensure_env_entry "$tmp_env" PUID "${PUID:-65534}"
   ensure_env_entry "$tmp_env" PGID "${PGID:-65534}"
-  ensure_env_entry "$tmp_env" MEDIASTACK_ADMIN_USER "$shared_admin_user"
-  ensure_env_entry "$tmp_env" MEDIASTACK_ADMIN_PASSWORD "$shared_admin_password"
+  ensure_env_secret "$tmp_env" MEDIASTACK_ADMIN_USER "$shared_admin_user"
+  ensure_env_secret "$tmp_env" MEDIASTACK_ADMIN_PASSWORD "$shared_admin_password"
   ensure_env_entry "$tmp_env" VPN_TYPE "${VPN_TYPE:-openvpn}"
   ensure_env_entry "$tmp_env" FIREWALL "${FIREWALL:-on}"
   ensure_env_entry "$tmp_env" FIREWALL_VPN_INPUT_PORTS "${FIREWALL_VPN_INPUT_PORTS:-6881}"
   ensure_env_entry "$tmp_env" FIREWALL_OUTBOUND_SUBNETS "${FIREWALL_OUTBOUND_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8}"
-  ensure_env_entry "$tmp_env" JELLYSTAT_DB_PASS "${JELLYSTAT_DB_PASS:-$(rand_hex 24)}"
-  ensure_env_entry "$tmp_env" JELLYSTAT_JWT_SECRET "${JELLYSTAT_JWT_SECRET:-$(rand_hex 32)}"
-  ensure_env_entry "$tmp_env" HOMARR_SECRET_ENCRYPTION_KEY "${HOMARR_SECRET_ENCRYPTION_KEY:-$(rand_hex 32)}"
-  ensure_env_entry "$tmp_env" QBITTORRENT_USER "${QBITTORRENT_USER:-${shared_admin_user}}"
-  ensure_env_entry "$tmp_env" QBITTORRENT_PASSWORD "${QBITTORRENT_PASSWORD:-${shared_admin_password}}"
-  ensure_env_entry "$tmp_env" JELLYFIN_ADMIN_USER "${JELLYFIN_ADMIN_USER:-${shared_admin_user}}"
-  ensure_env_entry "$tmp_env" JELLYFIN_ADMIN_PASSWORD "${JELLYFIN_ADMIN_PASSWORD:-${shared_admin_password}}"
-  ensure_env_entry "$tmp_env" PROFILARR_ADMIN_USER "${PROFILARR_ADMIN_USER:-${shared_admin_user}}"
-  ensure_env_entry "$tmp_env" PROFILARR_ADMIN_PASSWORD "${PROFILARR_ADMIN_PASSWORD:-${shared_admin_password}}"
-  ensure_env_entry "$tmp_env" PORTAINER_ADMIN_USER "${PORTAINER_ADMIN_USER:-${shared_admin_user}}"
-  ensure_env_entry "$tmp_env" PORTAINER_ADMIN_PASSWORD "${PORTAINER_ADMIN_PASSWORD:-${shared_admin_password}}"
+  ensure_env_secret "$tmp_env" JELLYSTAT_DB_PASS "${JELLYSTAT_DB_PASS:-$(rand_hex 24)}"
+  ensure_env_secret "$tmp_env" JELLYSTAT_JWT_SECRET "${JELLYSTAT_JWT_SECRET:-$(rand_hex 32)}"
+  ensure_env_secret "$tmp_env" HOMARR_SECRET_ENCRYPTION_KEY "${HOMARR_SECRET_ENCRYPTION_KEY:-$(rand_hex 32)}"
+  ensure_env_secret "$tmp_env" HOMARR_ADMIN_USER "${HOMARR_ADMIN_USER:-${shared_admin_user}}"
+  ensure_env_secret "$tmp_env" HOMARR_ADMIN_PASSWORD "${HOMARR_ADMIN_PASSWORD:-${shared_admin_password}}"
+  ensure_env_secret "$tmp_env" QBITTORRENT_USER "${QBITTORRENT_USER:-${shared_admin_user}}"
+  ensure_env_secret "$tmp_env" QBITTORRENT_PASSWORD "${QBITTORRENT_PASSWORD:-${shared_admin_password}}"
+  ensure_env_secret "$tmp_env" JELLYFIN_ADMIN_USER "${JELLYFIN_ADMIN_USER:-${shared_admin_user}}"
+  ensure_env_secret "$tmp_env" JELLYFIN_ADMIN_PASSWORD "${JELLYFIN_ADMIN_PASSWORD:-${shared_admin_password}}"
+  ensure_env_secret "$tmp_env" PROFILARR_ADMIN_USER "${PROFILARR_ADMIN_USER:-${shared_admin_user}}"
+  ensure_env_secret "$tmp_env" PROFILARR_ADMIN_PASSWORD "${PROFILARR_ADMIN_PASSWORD:-${shared_admin_password}}"
+  ensure_env_secret "$tmp_env" PORTAINER_ADMIN_USER "${PORTAINER_ADMIN_USER:-${shared_admin_user}}"
+  ensure_env_secret "$tmp_env" PORTAINER_ADMIN_PASSWORD "${PORTAINER_ADMIN_PASSWORD:-${shared_admin_password}}"
+  set_env_entry "$tmp_env" QNAP_ENABLED "$ENABLE_QNAP"
+  set_env_entry "$tmp_env" APPLY_TRASH "$APPLY_TRASH"
+  set_env_entry "$tmp_env" SUBTITLE_REPAIR_TIMER_ENABLED "$ENABLE_SUBTITLE_TIMER"
 
   if [[ "$AMD_ACTIVE" == "1" ]]; then
     # Jellyfin runs as PUID/PGID and must join the LXC's render/video groups to
@@ -1730,9 +1779,13 @@ EOF
   [[ -n "$MEDIASTACK_ADMIN_USER" ]] || die "MEDIASTACK_ADMIN_USER cannot be empty."
   [[ ${#MEDIASTACK_ADMIN_PASSWORD} -ge 12 ]] || die "MEDIASTACK_ADMIN_PASSWORD must be at least 12 characters."
 
-  if grep -q 'CHANGE_ME' "$tmp_env"; then
+  local generated_vpn_user generated_vpn_password
+  generated_vpn_user="$(awk -F= '/^NORDVPN_USER=/{value=substr($0,index($0,"=")+1)} END{print value}' "$tmp_env")"
+  generated_vpn_password="$(awk -F= '/^NORDVPN_PASS=/{value=substr($0,index($0,"=")+1)} END{print value}' "$tmp_env")"
+  if [[ -z "$generated_vpn_user" || "$generated_vpn_user" == CHANGE_ME* ||
+        -z "$generated_vpn_password" || "$generated_vpn_password" == CHANGE_ME* ]]; then
     ENV_HAS_PLACEHOLDER=1
-    warn "The generated .env still contains CHANGE_ME placeholders. Stack start will be skipped."
+    warn "NordVPN manual-service credentials are missing. The core apps will be configured, but Gluetun and qBittorrent will remain stopped."
   fi
 
   run pct push "$CTID" "$tmp_env" "${APP_DIR}/.env" --perms 0600
@@ -1750,29 +1803,43 @@ compose_command() {
 }
 
 start_stack() {
-  local cmd
+  local cmd core_services
   cmd="$(compose_command)"
+  core_services="prowlarr byparr sonarr radarr lidarr bazarr kavita mylar jellyfin jellyseerr wizarr jellystat-db jellystat recyclarr profilarr mediastack-home homarr portainer"
   pct_bash "printf '%s\n' '${cmd}' > '${APP_DIR}/.compose-command'"
 
-  if [[ "$START_STACK" != "1" || "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+  if [[ "$START_STACK" != "1" ]]; then
     warn "Skipping docker compose up. To start later:"
     warn "pct exec ${CTID} -- bash -lc \"cd ${APP_DIR} && \$(cat ${APP_DIR}/.compose-command) up -d\""
     return
   fi
 
-  info "Pulling and starting media stack"
-  pct_bash "cd '${APP_DIR}' && ${cmd} pull && ${cmd} up -d"
+  info "Pulling media stack images"
+  pct_bash "cd '${APP_DIR}' && ${cmd} pull"
+  if [[ "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+    info "Starting core media apps while VPN downloads remain disabled"
+    pct_bash "cd '${APP_DIR}' && ${cmd} up -d ${core_services}"
+  else
+    info "Starting complete media stack"
+    pct_bash "cd '${APP_DIR}' && ${cmd} up -d"
+  fi
 }
 
 configure_stack() {
-  if [[ "$AUTO_CONFIGURE" != "1" || "$START_STACK" != "1" || "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+  local downloads_enabled=1
+  [[ "$ENV_HAS_PLACEHOLDER" == "1" ]] && downloads_enabled=0
+  if [[ "$AUTO_CONFIGURE" != "1" || "$START_STACK" != "1" ]]; then
     warn "Skipping automatic app integration. To run it later:"
-    warn "pct exec ${CTID} -- env APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' '${APP_DIR}/configure-media-stack.sh'"
+    warn "pct exec ${CTID} -- env APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' DOWNLOADS_ENABLED='${downloads_enabled}' '${APP_DIR}/configure-media-stack.sh'"
     return
   fi
 
-  info "Configuring media storage paths and connecting the media applications"
-  pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' '${APP_DIR}/configure-media-stack.sh'"
+  info "Configuring application logins, libraries, paths, integrations, and dashboards"
+  pct_bash "APP_DIR='${APP_DIR}' QNAP_ENABLED='${ENABLE_QNAP}' APPLY_TRASH='${APPLY_TRASH}' DOWNLOADS_ENABLED='${downloads_enabled}' '${APP_DIR}/configure-media-stack.sh'"
+  if [[ "$downloads_enabled" == "0" ]]; then
+    warn "Core application setup is complete. After adding NordVPN manual-service credentials, finish with:"
+    warn "pct exec ${CTID} -- /usr/local/sbin/mediastack-finish-setup"
+  fi
 }
 
 enable_subtitle_repair_timer() {
@@ -1780,7 +1847,7 @@ enable_subtitle_repair_timer() {
     info "Automatic subtitle repair timer disabled"
     return
   fi
-  if [[ "$START_STACK" != "1" || "$AUTO_CONFIGURE" != "1" || "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+  if [[ "$START_STACK" != "1" || "$AUTO_CONFIGURE" != "1" ]]; then
     warn "Skipping subtitle repair timer until the stack is started and automatically configured."
     warn "Enable it later with: APP_DIR='${APP_DIR}' QNAP_REQUIRED='${ENABLE_QNAP}' '${APP_DIR}/fix-subtitles.sh' --install-timer --timer-only"
     return
@@ -1790,6 +1857,8 @@ enable_subtitle_repair_timer() {
 }
 
 verify_stack() {
+  local downloads_enabled=1
+  [[ "$ENV_HAS_PLACEHOLDER" == "1" ]] && downloads_enabled=0
   info "Verification"
   pct_bash "docker --version && docker compose version"
   if [[ "$NVIDIA_ACTIVE" == "1" ]]; then
@@ -1799,7 +1868,7 @@ verify_stack() {
     pct_bash "vainfo --display drm --device /dev/dri/renderD128 2>&1 | head -n 20 || true"
   fi
 
-  if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" ]]; then
+  if [[ "$START_STACK" == "1" ]]; then
     pct_bash "cd '${APP_DIR}' && \$(cat '${APP_DIR}/.compose-command') ps"
     # This single-quoted script is intentionally expanded inside the LXC.
     # shellcheck disable=SC2016
@@ -1810,7 +1879,7 @@ for port in 8088 8096 5055 3000 6868 8989 7878 9696 8080 8686 6767 5690 5000 809
 done
 '
     if [[ "$AUTO_CONFIGURE" == "1" ]]; then
-      pct_bash "APP_DIR='${APP_DIR}' '${APP_DIR}/verify-media-stack.sh'"
+      pct_bash "APP_DIR='${APP_DIR}' DOWNLOADS_ENABLED='${downloads_enabled}' '${APP_DIR}/verify-media-stack.sh'"
     fi
   fi
 }
@@ -1819,11 +1888,19 @@ show_completion() {
   local lxc_ip=""
   local portal="not started"
   local completion_label="Completed successfully!"
-  [[ "$DRY_RUN" == "1" ]] && completion_label="Dry run completed successfully!"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    completion_label="Dry run completed successfully!"
+  elif [[ "$START_STACK" != "1" ]]; then
+    completion_label="LXC installed; Docker stack start was skipped."
+  elif [[ "$AUTO_CONFIGURE" != "1" ]]; then
+    completion_label="Stack started; automatic application setup was skipped."
+  elif [[ "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+    completion_label="Core apps configured; VPN download setup is pending."
+  fi
   if [[ "$DRY_RUN" == "0" ]]; then
     lxc_ip="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)"
   fi
-  if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" && -n "$lxc_ip" ]]; then
+  if [[ "$START_STACK" == "1" && -n "$lxc_ip" ]]; then
     portal="http://${lxc_ip}:8088"
   fi
 
@@ -1841,9 +1918,13 @@ show_completion() {
     printf '  \033[38;5;99m│\033[0m  Media Stack UI  \033[38;5;45m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$portal"
     printf '  \033[38;5;99m│\033[0m  Install log     \033[38;5;245m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$LOG_FILE"
     printf '  \033[38;5;99m╰──────────────────────────────────────────────────────────────╯\033[0m\n'
-    if [[ "$START_STACK" == "1" && "$ENV_HAS_PLACEHOLDER" == "0" ]]; then
+    if [[ "$START_STACK" == "1" && "$AUTO_CONFIGURE" == "1" ]]; then
       printf '\n  \033[1;97mShared login\033[0m  %s / %s\n' "$MEDIASTACK_ADMIN_USER" "$MEDIASTACK_ADMIN_PASSWORD"
       printf '  \033[38;5;245mCredentials are also stored in %s/.env inside CT%s (mode 0600).\033[0m\n' "$APP_DIR" "$CTID"
+    fi
+    if [[ "$START_STACK" == "1" && "$AUTO_CONFIGURE" == "1" && "$ENV_HAS_PLACEHOLDER" == "1" ]]; then
+      printf '  \033[1;93mVPN pending\033[0m   Add NordVPN manual credentials to %s/.env, then run:\n' "$APP_DIR"
+      printf '                pct exec %s -- /usr/local/sbin/mediastack-finish-setup\n' "$CTID"
     fi
     printf '  \033[1;97mLXC console\033[0m  root / %s\n' "$ROOT_PASSWORD"
     printf '  \033[38;5;245mChange the root password after first login with: passwd\033[0m\n'

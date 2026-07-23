@@ -269,7 +269,8 @@ services:
     restart: unless-stopped
 
   homarr:
-    image: ghcr.io/homarr-labs/homarr:latest
+    # Pinned because first-run dashboard provisioning uses Homarr's onboarding API.
+    image: ghcr.io/homarr-labs/homarr:v1.71.0
     container_name: homarr
     environment:
       - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_ENCRYPTION_KEY:?HOMARR_SECRET_ENCRYPTION_KEY is required}

@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 APP_DIR="${APP_DIR:-/opt/mediastack}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
+DOWNLOADS_ENABLED="${DOWNLOADS_ENABLED:-1}"
 
 info() { printf '\033[1;34m[verify]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[verify] WARN:\033[0m %s\n' "$*" >&2; }
@@ -42,14 +43,17 @@ bazarr_get() {
 
 verify_containers() {
   local name state
-  for name in gluetun qbittorrent prowlarr byparr sonarr radarr lidarr bazarr kavita mylar jellyfin jellyseerr wizarr jellystat-db jellystat recyclarr profilarr mediastack-home portainer; do
+  for name in prowlarr byparr sonarr radarr lidarr bazarr kavita mylar jellyfin jellyseerr wizarr jellystat-db jellystat recyclarr profilarr mediastack-home homarr portainer; do
     state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
     [[ "$state" == "running" ]] || die "Container ${name} is ${state:-missing}."
   done
-  # Homarr is an optional dashboard; a broken Homarr must not fail the whole verifier.
-  state="$(docker inspect -f '{{.State.Status}}' homarr 2>/dev/null || true)"
-  [[ "$state" == "running" ]] || warn "Optional Homarr dashboard is ${state:-missing}; the core stack is unaffected."
-  [[ "$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || true)" == "healthy" ]] || die "Gluetun is not healthy."
+  if [[ "$DOWNLOADS_ENABLED" == "1" ]]; then
+    for name in gluetun qbittorrent; do
+      state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+      [[ "$state" == "running" ]] || die "Container ${name} is ${state:-missing}."
+    done
+    [[ "$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || true)" == "healthy" ]] || die "Gluetun is not healthy."
+  fi
   [[ "$(docker inspect -f '{{.State.Health.Status}}' profilarr 2>/dev/null || true)" == "healthy" ]] || die "Profilarr is not healthy."
   [[ "$(docker inspect -f '{{.State.Health.Status}}' jellystat-db 2>/dev/null || true)" == "healthy" ]] || die "Jellystat PostgreSQL is not healthy."
   info "Core containers are running; required health checks pass"
@@ -72,8 +76,7 @@ verify_web_uis() {
     http://127.0.0.1:8090/; do
     curl -kfsS --max-time 15 -o /dev/null "$target" || die "Web endpoint failed: ${target}"
   done
-  # Homarr is optional; warn but do not fail the verifier if its dashboard is down.
-  curl -kfsS --max-time 15 -o /dev/null http://127.0.0.1:7575/ || warn "Optional Homarr dashboard (7575) is not responding; the core stack is unaffected."
+  curl -kfsS --max-time 15 -o /dev/null http://127.0.0.1:7575/ || die "Homarr dashboard (7575) is not responding."
   curl -kfsS --max-time 15 -o /dev/null https://127.0.0.1:9443/api/system/status || die "Portainer API is unavailable."
   portal="$(curl -fsS http://127.0.0.1:8088/)"
   grep -q 'Profilarr' <<<"$portal" || die "Media Stack Home is missing its Profilarr link."
@@ -81,15 +84,22 @@ verify_web_uis() {
 }
 
 verify_qbittorrent() {
-  local cookie username password preferences categories
+  local cookie username password preferences categories login_response login_code
   cookie="$(mktemp)"
+  login_response="$(mktemp)"
   chmod 0600 "$cookie"
   username="$(env_value QBITTORRENT_USER admin)"
   password="$(env_value QBITTORRENT_PASSWORD)"
-  curl -fsS --max-time 15 -o /dev/null -c "$cookie" \
+  login_code="$(curl -sS --max-time 15 -o "$login_response" -w '%{http_code}' -c "$cookie" \
     -H 'Referer: http://127.0.0.1:8080' \
     --data-urlencode "username=${username}" --data-urlencode "password=${password}" \
-    http://127.0.0.1:8080/api/v2/auth/login || { rm -f "$cookie"; die "qBittorrent shared login failed."; }
+    http://127.0.0.1:8080/api/v2/auth/login || true)"
+  if [[ "$login_code" != "204" ]] &&
+    { [[ "$login_code" != "200" ]] || ! grep -qx 'Ok\.' "$login_response"; }; then
+    rm -f "$cookie" "$login_response"
+    die "qBittorrent shared login failed."
+  fi
+  rm -f "$login_response"
   preferences="$(curl -fsS -b "$cookie" http://127.0.0.1:8080/api/v2/app/preferences)"
   jq -e '.save_path == "/data/torrents" and .temp_path == "/data/torrents/incomplete" and .temp_path_enabled == true' <<<"$preferences" >/dev/null || {
     rm -f "$cookie"; die "qBittorrent media paths are not configured.";
@@ -111,16 +121,22 @@ verify_arr_wiring() {
   roots="$(arr_get lidarr 8686 v1 rootfolder)"
   jq -e 'map(.path) | index("/data/media/music")' <<<"$roots" >/dev/null || die "Lidarr media root is missing."
 
-  clients="$(arr_get sonarr 8989 v3 downloadclient)"
-  jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Sonarr qBittorrent connection is missing."
-  clients="$(arr_get radarr 7878 v3 downloadclient)"
-  jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Radarr qBittorrent connection is missing."
-  clients="$(arr_get lidarr 8686 v1 downloadclient)"
-  jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Lidarr qBittorrent connection is missing."
+  if [[ "$DOWNLOADS_ENABLED" == "1" ]]; then
+    clients="$(arr_get sonarr 8989 v3 downloadclient)"
+    jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Sonarr qBittorrent connection is missing."
+    clients="$(arr_get radarr 7878 v3 downloadclient)"
+    jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Radarr qBittorrent connection is missing."
+    clients="$(arr_get lidarr 8686 v1 downloadclient)"
+    jq -e '.[] | select(.implementation == "QBittorrent")' <<<"$clients" >/dev/null || die "Lidarr qBittorrent connection is missing."
+  fi
 
   applications="$(arr_get prowlarr 9696 v1 applications)"
   jq -e 'map(.implementation) | index("Sonarr") and index("Radarr") and index("Lidarr")' <<<"$applications" >/dev/null || die "Prowlarr application sync is incomplete."
-  info "Sonarr, Radarr, Lidarr, qBittorrent, and Prowlarr wiring passes"
+  if [[ "$DOWNLOADS_ENABLED" == "1" ]]; then
+    info "Sonarr, Radarr, Lidarr, qBittorrent, and Prowlarr wiring passes"
+  else
+    info "Sonarr, Radarr, Lidarr, and Prowlarr core wiring passes; VPN downloads are pending"
+  fi
 }
 
 verify_bazarr() {
@@ -200,9 +216,42 @@ verify_jellyfin_and_seerr() {
   info "Jellyfin shared login/libraries and Seerr initialization pass"
 }
 
+verify_homarr() {
+  local username response step
+  username="$(env_value HOMARR_ADMIN_USER "$(env_value MEDIASTACK_ADMIN_USER admin)")"
+  username="$(tr '[:upper:]' '[:lower:]' <<<"$username" | xargs)"
+  response="$(curl -fsS --max-time 30 -G \
+    --data-urlencode 'input={"json":null}' \
+    -H 'x-trpc-source: mediastack-verifier' \
+    http://127.0.0.1:7575/api/trpc/onboard.currentStep)"
+  step="$(jq -er '.result.data.json.current // .result.data.current' <<<"$response")"
+  [[ "$step" == "finish" ]] || die "Homarr onboarding is incomplete (current step: ${step})."
+  docker exec homarr homarr users list 2>/dev/null |
+    awk -F '\t' -v expected="$username" 'NR > 1 && tolower($2) == expected { found=1 } END { exit(found ? 0 : 1) }' ||
+    die "Homarr shared admin user is missing."
+  [[ -f "${APP_DIR}/.homarr-apps-created" ]] || die "Homarr's media-stack dashboard was not populated."
+  info "Homarr shared admin user and populated dashboard pass"
+}
+
+verify_portainer() {
+  local username password response token endpoints
+  username="$(env_value PORTAINER_ADMIN_USER "$(env_value MEDIASTACK_ADMIN_USER admin)")"
+  password="$(env_value PORTAINER_ADMIN_PASSWORD "$(env_value MEDIASTACK_ADMIN_PASSWORD)")"
+  response="$(curl -kfsS --max-time 30 \
+    -X POST -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg username "$username" --arg password "$password" '{Username:$username,Password:$password}')" \
+    https://127.0.0.1:9443/api/auth)" ||
+    die "Portainer shared login failed."
+  token="$(jq -er '.jwt' <<<"$response")" || die "Portainer authentication did not return a token."
+  endpoints="$(curl -kfsS --max-time 30 -H "Authorization: Bearer ${token}" \
+    https://127.0.0.1:9443/api/endpoints)"
+  jq -e '.[] | select((.URL // .Url // "") == "unix:///var/run/docker.sock")' <<<"$endpoints" >/dev/null ||
+    die "Portainer's local Docker environment is missing."
+  info "Portainer shared login and local Docker environment pass"
+}
+
 verify_backends() {
   local hwaccels
-  [[ "$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:9443/api/users/admin/check)" == "204" ]] || die "Portainer admin account is not initialized."
   docker exec recyclarr recyclarr config list local >/dev/null || die "Recyclarr local config is invalid."
   if [[ -e /dev/nvidia0 ]]; then
     hwaccels="$(docker exec jellyfin /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -hwaccels 2>/dev/null)"
@@ -213,21 +262,33 @@ verify_backends() {
     docker exec jellyfin test -r /dev/dri/renderD128 ||
       die "Jellyfin cannot read /dev/dri/renderD128; check RENDER_GID/VIDEO_GID in the .env."
   fi
-  info "Portainer, Recyclarr, and available GPU backend checks pass"
+  info "Recyclarr and available GPU backend checks pass"
 }
 
 main() {
   [[ -f "$ENV_FILE" ]] || die "Missing ${ENV_FILE}."
   command -v curl >/dev/null 2>&1 || die "curl is required."
   command -v jq >/dev/null 2>&1 || die "jq is required."
+  [[ "$DOWNLOADS_ENABLED" == "0" || "$DOWNLOADS_ENABLED" == "1" ]] ||
+    die "DOWNLOADS_ENABLED must be 0 or 1."
   verify_containers
   verify_web_uis
-  verify_qbittorrent
+  if [[ "$DOWNLOADS_ENABLED" == "1" ]]; then
+    verify_qbittorrent
+  fi
   verify_arr_wiring
   verify_bazarr
   verify_profilarr
   verify_jellyfin_and_seerr
+  verify_homarr
+  verify_portainer
   verify_backends
+  if [[ "$DOWNLOADS_ENABLED" == "1" ]]; then
+    touch "${APP_DIR}/.mediastack-configured"
+    rm -f "${APP_DIR}/.mediastack-core-configured"
+  else
+    touch "${APP_DIR}/.mediastack-core-configured"
+  fi
   info "All media-stack integration checks passed"
 }
 

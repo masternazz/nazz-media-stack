@@ -103,7 +103,8 @@ You need:
 - Either:
   - free Proxmox storage for an onboard media disk, or
   - a reachable NFS export for primary media storage
-- NordVPN manual-service credentials before the Docker stack can start
+- NordVPN manual-service credentials for Gluetun/qBittorrent downloads. The
+  core applications can be installed and configured before these are added.
 - Optional NVIDIA or AMD GPU already visible to the Proxmox host
 
 Recommended starting resources are the installer defaults:
@@ -168,6 +169,22 @@ Confirm the installation plan shown on screen, especially:
 
 `--replace` destroys the existing container before creating the new one. If
 that container owns an onboard media volume, its media data is destroyed too.
+
+### Repair an existing blank/default install
+
+Do not destroy or reinstall the LXC. From a repository checkout on the Proxmox
+host, run:
+
+```bash
+chmod +x repair-existing.sh
+./repair-existing.sh <CTID>
+```
+
+The repair updates only the stack's compose/setup assets, preserves `.env`,
+application databases, configs, and media, then initializes the logins,
+libraries, application connections, Portainer environment, and Homarr
+dashboard. If VPN credentials are still placeholders, it repairs the core apps
+and prints the one command needed to finish downloads later.
 
 ## Installer modes
 
@@ -393,42 +410,35 @@ If you answer **No** when the installer asks for VPN credentials:
 
 - the LXC, Docker, compose files, and environment file are installed;
 - `NORDVPN_USER` and `NORDVPN_PASS` remain `CHANGE_ME`;
-- the Docker stack is deliberately left stopped;
-- first-run application configuration is skipped.
+- Jellyfin, Portainer, Homarr, the Arr applications, Seerr, and the other core
+  services are started and configured;
+- Gluetun and qBittorrent remain stopped;
+- the Arr download-client connections remain pending.
 
-This is a safe incomplete install, not a VPN-free running mode. To finish it:
+Jellyfin and the core applications are usable in this state, but automated
+downloads are intentionally disabled. To finish the download setup:
 
 ```bash
 pct enter <CTID>
 nano /opt/mediastack/.env
 ```
 
-Replace both VPN `CHANGE_ME` values, exit the LXC, and check for placeholders:
+Replace both VPN `CHANGE_ME` values, exit the LXC, and confirm them:
 
 ```bash
-pct exec <CTID> -- grep -n CHANGE_ME /opt/mediastack/.env
+pct exec <CTID> -- grep -E '^NORDVPN_(USER|PASS)=' /opt/mediastack/.env
 ```
 
-No output means the placeholders are gone. Start and configure the stack:
+Then run the installed finisher:
 
 ```bash
-pct exec <CTID> -- bash -lc \
-  'cd /opt/mediastack && $(cat .compose-command) up -d'
-
-pct exec <CTID> -- env \
-  APP_DIR=/opt/mediastack \
-  QNAP_ENABLED=0 \
-  APPLY_TRASH=1 \
-  /opt/mediastack/configure-media-stack.sh
-
-pct exec <CTID> -- env \
-  APP_DIR=/opt/mediastack \
-  QNAP_REQUIRED=0 \
-  /opt/mediastack/fix-subtitles.sh --install-timer --timer-only
+pct exec <CTID> -- /usr/local/sbin/mediastack-finish-setup
 ```
 
-Change both QNAP values from `0` to `1` when the optional secondary share was
-enabled.
+It starts Gluetun/qBittorrent, creates qBittorrent categories, connects the Arr
+download clients, reapplies the selected setup, and verifies the complete
+installation. The installer stores the secondary-storage, TRaSH, and subtitle
+timer choices in `.env`, so they do not need to be re-entered.
 
 Other Gluetun-supported providers can be used by editing the VPN variables and
 compose configuration, but the guided installer currently collects NordVPN
@@ -444,13 +454,14 @@ The guided installer asks for one shared password and confirms it once.
 | Jellyfin | Chosen shared admin user, default `admin` | Shared password |
 | qBittorrent | Chosen shared admin user, default `admin` | Shared password |
 | Profilarr | Chosen shared admin user, default `admin` | Shared password |
+| Homarr | Chosen shared admin user, normalized to lowercase | Shared password |
 | Portainer | Chosen shared admin user, default `admin` | Shared password |
 
 The LXC console and the Jellyfin web page are different login systems. Use
 `root` for `pct enter`, the Proxmox console, or SSH. Use the application admin
 username for Jellyfin.
 
-Sonarr, Radarr, Lidarr, Prowlarr, Bazarr, Seerr, Homarr, and the other services
+Sonarr, Radarr, Lidarr, Prowlarr, Bazarr, Seerr, and the other services
 do not all use this shared login. Their inter-application API keys are created
 and configured automatically where supported; configure additional UI
 authentication inside each app before exposing it beyond the trusted LAN.
@@ -478,6 +489,9 @@ For unattended installs, set:
 MEDIASTACK_ADMIN_USER='admin'
 MEDIASTACK_ADMIN_PASSWORD='at-least-12-characters'
 ```
+
+For reliable `.env` parsing, the installer accepts letters, numbers, and
+`. _ @ % + = : , ! ~ / -` in the shared password.
 
 Set a different Linux root password with:
 
@@ -528,7 +542,10 @@ Recyclarr is a scheduled command-line service and has no web port.
 When automatic configuration is enabled, the installer:
 
 - creates the shared media and download directory tree;
-- applies the shared login to Jellyfin, qBittorrent, Profilarr, and Portainer;
+- applies the shared login to Jellyfin, qBittorrent, Profilarr, Homarr, and
+  Portainer;
+- creates a populated Homarr dashboard with links to the media applications;
+- creates Portainer's admin account and local Docker environment;
 - creates qBittorrent categories and matching save paths;
 - connects Sonarr, Radarr, and Lidarr to qBittorrent;
 - creates their root folders;
@@ -619,6 +636,7 @@ Relevant environment variables include:
 | `NORDVPN_COUNTRIES` | Preferred Gluetun country; default `United States` |
 | `MEDIASTACK_ADMIN_USER` | Shared application admin; default `admin` |
 | `MEDIASTACK_ADMIN_PASSWORD` | Shared application password; minimum 12 characters |
+| `HOMARR_ADMIN_USER` / `HOMARR_ADMIN_PASSWORD` | Optional Homarr-specific override |
 | `TZ` | Container/application timezone |
 | `PUID` / `PGID` | Application user/group IDs |
 
@@ -664,9 +682,9 @@ Run the included end-to-end verification:
 pct exec <CTID> -- /opt/mediastack/verify-media-stack.sh
 ```
 
-It checks core containers, health states, web endpoints, and important
-application wiring. Homarr is optional and does not fail the verification when
-unavailable.
+It checks core containers, health states, web endpoints, logins, Homarr
+onboarding/dashboard state, Portainer's local Docker environment, and important
+application wiring.
 
 Inspect compose state:
 
@@ -825,10 +843,11 @@ selected VLAN, DHCP/static gateway, firewall, and `--nameserver` value.
 Check for unfinished VPN values:
 
 ```bash
-pct exec <CTID> -- grep -n CHANGE_ME /opt/mediastack/.env
+pct exec <CTID> -- grep -E '^NORDVPN_(USER|PASS)=' /opt/mediastack/.env
 ```
 
-If found, finish the steps in [VPN requirement](#vpn-requirement). Also inspect:
+If either value still begins with `CHANGE_ME`, finish the steps in
+[VPN requirement](#vpn-requirement). Also inspect:
 
 ```bash
 pct exec <CTID> -- bash -lc \
@@ -854,7 +873,7 @@ pct exec <CTID> -- ls -l /dev/net/tun
 ### The shared login does not work
 
 Use `root` only for the LXC console. Use the shared admin username, normally
-`admin`, for Jellyfin, qBittorrent, Profilarr, and Portainer.
+`admin`, for Jellyfin, qBittorrent, Profilarr, Homarr, and Portainer.
 
 Read the recorded values using the command in
 [Logins and passwords](#logins-and-passwords). If the app was initialized
@@ -936,11 +955,13 @@ These logs may contain infrastructure details. Review them before sharing.
 |---|---|
 | `install.sh` | Small remote bootstrap |
 | `install-jellyfin-stack.sh` | Proxmox/LXC installer and guided UI |
+| `repair-existing.sh` | In-place repair for a blank or partially configured LXC |
 | `jellyfin-stack/docker-compose.yml` | Base application stack |
 | `jellyfin-stack/docker-compose.nvidia.yml` | NVIDIA compose overlay |
 | `jellyfin-stack/docker-compose.amd.yml` | AMD/VAAPI compose overlay |
 | `jellyfin-stack/.env.example` | Environment and secret template |
 | `jellyfin-stack/configure-media-stack.sh` | First-run application wiring |
+| `jellyfin-stack/finish-media-stack-setup.sh` | Idempotent VPN-later setup finisher |
 | `jellyfin-stack/verify-media-stack.sh` | Post-install verification |
 | `jellyfin-stack/fix-subtitles.sh` | Subtitle repair and timer installer |
 | `jellyfin-stack/portal/` | Media Stack Home page |
