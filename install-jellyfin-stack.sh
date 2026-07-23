@@ -1304,12 +1304,18 @@ start_container() {
   # stub (for example 127.0.0.53) leaves the LXC unable to resolve package hosts.
   run pct set "$CTID" --nameserver "$NAMESERVER"
   run pct exec "$CTID" -- sh -c \
-    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:3\n" "$1" > /etc/resolv.conf' \
+    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:5 single-request-reopen\n" "$1" > /etc/resolv.conf' \
     sh "$NAMESERVER"
 
+  # `getent hosts` can succeed with only an AAAA response even when the guest
+  # has no IPv6 route and IPv4 DNS is not ready. Require both an IPv4 answer
+  # and the same outbound TCP path that Debian's HTTP repositories need.
   local ready_count=0
-  for _ in $(seq 1 60); do
-    if pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1; then
+  for _ in $(seq 1 90); do
+    if pct exec "$CTID" -- getent ahostsv4 deb.debian.org >/dev/null 2>&1 &&
+       pct exec "$CTID" -- timeout 8 bash -c \
+         'exec 3<>/dev/tcp/deb.debian.org/80; exec 3>&-' \
+         >/dev/null 2>&1; then
       ready_count=$(( ready_count + 1 ))
       if (( ready_count >= 3 )); then
         return
@@ -1319,7 +1325,7 @@ start_container() {
     fi
     sleep 2
   done
-  die "CT${CTID} started, but it could not reliably resolve deb.debian.org using ${NAMESERVER}. Check the bridge, VLAN, gateway, and firewall."
+  die "CT${CTID} started, but IPv4 DNS/HTTP did not become reliable through ${NAMESERVER}. Check the bridge, VLAN, gateway, DNS policy, and firewall."
 }
 
 install_docker() {
@@ -1333,20 +1339,27 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 wait_for_dns() {
   local attempt
-  for attempt in $(seq 1 30); do
-    if getent hosts deb.debian.org >/dev/null 2>&1; then
+  for attempt in $(seq 1 60); do
+    if getent ahostsv4 deb.debian.org >/dev/null 2>&1 &&
+       timeout 8 bash -c '"'"'exec 3<>/dev/tcp/deb.debian.org/80; exec 3>&-'"'"' \
+         >/dev/null 2>&1; then
       return
     fi
     sleep 2
   done
-  echo "DNS did not resolve deb.debian.org after 60 seconds." >&2
+  echo "IPv4 DNS/HTTP did not reach deb.debian.org after 120 seconds." >&2
   return 1
 }
 
 apt_retry() {
   local attempt
   for attempt in 1 2 3; do
-    if apt-get -o Acquire::Retries=3 "$@"; then
+    wait_for_dns
+    if apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::ForceIPv4=true \
+      -o APT::Update::Error-Mode=any \
+      "$@"; then
       return
     fi
     echo "apt-get failed (attempt ${attempt}/3); retrying..." >&2
@@ -1359,7 +1372,7 @@ wait_for_dns
 apt_retry update
 apt_retry install -y ca-certificates curl gnupg jq python3 python3-yaml util-linux
 install -m 0755 -d /etc/apt/keyrings
-curl --retry 5 --retry-all-errors --connect-timeout 15 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+curl -4 --retry 5 --retry-all-errors --connect-timeout 15 -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 . /etc/os-release
 arch="$(dpkg --print-architecture)"

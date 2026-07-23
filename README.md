@@ -163,6 +163,10 @@ can be overridden by a flag or environment variable. Key settings:
 | Timezone | `--timezone` | Proxmox host timezone |
 | GPU passthrough | `--gpu auto\|nvidia\|amd\|off` | auto-detect |
 
+Before installing packages, the installer requires stable IPv4 DNS and an
+outbound HTTP connection to Debian's repository. APT updates treat partial
+repository failures as errors and retry instead of continuing with stale lists.
+
 Copy `jellyfin-stack/.env.example` to `.env` and fill it in to pin secrets, or
 let the installer generate strong random secrets for you (stored at
 `/opt/mediastack/.env`, mode `0600`, inside the LXC).
