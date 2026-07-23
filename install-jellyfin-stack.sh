@@ -10,7 +10,7 @@ CT_HOSTNAME="${CT_HOSTNAME:-jellyfin}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-auto}"
 TEMPLATE="${TEMPLATE:-auto}"
 ROOTFS_STORAGE="${ROOTFS_STORAGE:-auto}"
-DISK_GB="${DISK_GB:-60}"
+DISK_GB="${DISK_GB:-32}"
 CORES="${CORES:-2}"
 MEMORY_MB="${MEMORY_MB:-8000}"
 SWAP_MB="${SWAP_MB:-512}"
@@ -23,7 +23,7 @@ APP_DIR="${APP_DIR:-/opt/mediastack}"
 
 PRIMARY_STORAGE_MODE="${PRIMARY_STORAGE_MODE:-nfs}"
 LOCAL_MEDIA_STORAGE="${LOCAL_MEDIA_STORAGE:-auto}"
-LOCAL_MEDIA_SIZE_GB="${LOCAL_MEDIA_SIZE_GB:-100}"
+LOCAL_MEDIA_SIZE_GB="${LOCAL_MEDIA_SIZE_GB:-auto}"
 HOST_NAS="${HOST_NAS:-/mnt/jellyfin-media}"
 NAS_EXPORT="${NAS_EXPORT:-}"
 HOST_QNAP="${HOST_QNAP:-/mnt/jellyfin-media-secondary}"
@@ -40,6 +40,7 @@ DRY_RUN=0
 GUI_MODE="auto"
 SETTINGS_MODE="advanced"
 VERBOSE="${VERBOSE:-0}"
+ALLOW_PRIVILEGED_FALLBACK="${ALLOW_PRIVILEGED_FALLBACK:-1}"
 ENV_FILE=""
 ROOT_PASSWORD=""
 SSH_PUBLIC_KEY_FILE=""
@@ -66,6 +67,7 @@ PRETTY_OUTPUT=0
 CURRENT_STEP=""
 SPINNER_PID=""
 ERROR_HANDLED=0
+PRIVILEGED_FALLBACK_USED=0
 
 usage() {
   cat <<'EOF'
@@ -81,7 +83,7 @@ Core options:
   --hostname NAME           LXC hostname (default: jellyfin)
   --storage NAME            Proxmox rootfs storage (default: auto-detect)
   --template-storage NAME   Proxmox template storage (default: auto-detect)
-  --disk-gb GB              Root disk size in GB (default: 60)
+  --disk-gb GB              Root disk size in GB (default: 32)
   --cores COUNT             CPU cores (default: 2)
   --memory-mb MB            Memory in MB (default: 8000)
   --swap-mb MB              Swap in MB (default: 512)
@@ -95,7 +97,7 @@ Core options:
 Storage:
   --media-storage MODE      Primary media storage: nfs or local (default: nfs)
   --local-media-storage ID  Proxmox storage for an onboard media disk (default: most free)
-  --local-media-size GB     Onboard media disk size in GB (default: 100)
+  --local-media-size GB     Onboard media disk size in GB (default: fit to free space, max 100)
   --nas-export EXPORT       Primary NFS export when --media-storage nfs is used
   --host-nas PATH           Host mount path passed to LXC /mnt/nas (default: /mnt/jellyfin-media)
   --enable-qnap             Mount QNAP export and pass to LXC /mnt/qnap
@@ -123,6 +125,7 @@ Safety:
   --gui                     Force the terminal setup UI
   --no-gui                  Skip the setup UI for automation
   --verbose                 Show command output instead of the compact progress UI
+  --no-privileged-fallback  Do not retry as privileged if host ACLs block unprivileged extraction
   --replace                 Stop and destroy an existing CTID before creating it
   --dry-run                 Print commands without changing anything
   -h, --help                Show this help
@@ -240,14 +243,19 @@ die() {
 
 handle_error() {
   local code="$1" line="$2" command_text="$3"
+  local failed_step="${CURRENT_STEP:-Installation}"
   [[ "$ERROR_HANDLED" == "1" ]] && exit "$code"
   ERROR_HANDLED=1
   fail_step "Installation failed"
   if [[ "$PRETTY_OUTPUT" == "1" ]]; then
-    printf '  \033[1;91mERROR\033[0m  Command failed on line %s (exit %s): %s\n' "$line" "$code" "$command_text" >&2
-    [[ -n "${LOG_FILE:-}" ]] && printf '  Log: %s\n' "$LOG_FILE" >&2
+    printf '  \033[1;91mERROR\033[0m  %s failed (exit %s).\n' "$failed_step" "$code" >&2
   else
-    printf 'ERROR: command failed on line %s (exit %s): %s\n' "$line" "$code" "$command_text" >&2
+    printf 'ERROR: %s failed on line %s (exit %s): %s\n' "$failed_step" "$line" "$code" "$command_text" >&2
+  fi
+  if [[ -s "${LOG_FILE:-}" ]]; then
+    printf '\n  Last command output:\n' >&2
+    tail -n 20 "$LOG_FILE" | sed 's/^/    /' >&2
+    printf '  Full log: %s\n' "$LOG_FILE" >&2
   fi
   exit "$code"
 }
@@ -580,6 +588,7 @@ collect_primary_storage() {
       [[ "$LOCAL_MEDIA_STORAGE" == "auto" ]] &&
         LOCAL_MEDIA_STORAGE="$(preferred_media_storage)"
       LOCAL_MEDIA_STORAGE="$(ui_required_input "Onboard Storage" "Proxmox storage pool for the managed media disk" "$LOCAL_MEDIA_STORAGE")"
+      resolve_local_media_size
       LOCAL_MEDIA_SIZE_GB="$(ui_required_input "Onboard Storage" "Media disk size in GB" "$LOCAL_MEDIA_SIZE_GB")"
       NAS_EXPORT=""
       ;;
@@ -803,6 +812,7 @@ parse_args() {
       --gui) GUI_MODE="on"; shift ;;
       --no-gui) GUI_MODE="off"; shift ;;
       --verbose) VERBOSE=1; shift ;;
+      --no-privileged-fallback) ALLOW_PRIVILEGED_FALLBACK=0; shift ;;
       --replace) REPLACE=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -847,6 +857,65 @@ preferred_media_storage() {
       END { print name }'
   )"
   printf '%s\n' "${storage:-$ROOTFS_STORAGE}"
+}
+
+storage_available_gib() {
+  local storage="$1"
+  pvesm status --content rootdir 2>/dev/null |
+    awk -v storage="$storage" '
+      NR > 1 && $1 == storage && $3 == "active" && $6 ~ /^[0-9]+$/ {
+        print int($6 / 1048576)
+        exit
+      }'
+}
+
+recommended_local_media_size() {
+  local available_gib root_commit_gib reserve_gib usable_gib
+  available_gib="$(storage_available_gib "$LOCAL_MEDIA_STORAGE")"
+  [[ "$available_gib" =~ ^[0-9]+$ ]] || return 1
+
+  root_commit_gib=0
+  [[ "$LOCAL_MEDIA_STORAGE" == "$ROOTFS_STORAGE" ]] && root_commit_gib="$DISK_GB"
+  reserve_gib=$(( available_gib / 10 ))
+  (( reserve_gib < 8 )) && reserve_gib=8
+  usable_gib=$(( available_gib - root_commit_gib - reserve_gib ))
+  (( usable_gib >= 8 )) || return 1
+  (( usable_gib > 100 )) && usable_gib=100
+  printf '%s\n' "$usable_gib"
+}
+
+resolve_local_media_size() {
+  [[ "$PRIMARY_STORAGE_MODE" == "local" && "$LOCAL_MEDIA_SIZE_GB" == "auto" ]] || return 0
+  local suggested_size=""
+  suggested_size="$(recommended_local_media_size || true)"
+  if [[ ! "$suggested_size" =~ ^[0-9]+$ || "$suggested_size" -lt 8 ]]; then
+    local available_gib=""
+    available_gib="$(storage_available_gib "$LOCAL_MEDIA_STORAGE")"
+    die "Storage '${LOCAL_MEDIA_STORAGE}' has only ${available_gib:-unknown} GiB free. It cannot fit the ${DISK_GB} GiB root disk, an onboard media disk, and a safety reserve. Free space, choose another pool, or use NFS."
+  fi
+  LOCAL_MEDIA_SIZE_GB="$suggested_size"
+}
+
+validate_storage_capacity() {
+  local root_available_gib media_available_gib required_gib
+  root_available_gib="$(storage_available_gib "$ROOTFS_STORAGE")"
+  [[ "$root_available_gib" =~ ^[0-9]+$ ]] ||
+    die "Could not determine free space on root storage '${ROOTFS_STORAGE}'."
+
+  required_gib="$DISK_GB"
+  if [[ "$PRIMARY_STORAGE_MODE" == "local" && "$LOCAL_MEDIA_STORAGE" == "$ROOTFS_STORAGE" ]]; then
+    required_gib=$(( DISK_GB + LOCAL_MEDIA_SIZE_GB ))
+  fi
+  (( required_gib <= root_available_gib )) ||
+    die "Storage '${ROOTFS_STORAGE}' has ${root_available_gib} GiB free, but this install requests ${required_gib} GiB. Reduce the disk sizes or choose another storage pool."
+
+  if [[ "$PRIMARY_STORAGE_MODE" == "local" && "$LOCAL_MEDIA_STORAGE" != "$ROOTFS_STORAGE" ]]; then
+    media_available_gib="$(storage_available_gib "$LOCAL_MEDIA_STORAGE")"
+    [[ "$media_available_gib" =~ ^[0-9]+$ ]] ||
+      die "Could not determine free space on onboard media storage '${LOCAL_MEDIA_STORAGE}'."
+    (( LOCAL_MEDIA_SIZE_GB <= media_available_gib )) ||
+      die "Onboard media storage '${LOCAL_MEDIA_STORAGE}' has ${media_available_gib} GiB free, but the media disk requests ${LOCAL_MEDIA_SIZE_GB} GiB."
+  fi
 }
 
 resolve_platform_defaults() {
@@ -894,6 +963,7 @@ validate_integer() {
 }
 
 validate_settings() {
+  resolve_local_media_size
   validate_integer "Disk size" "$DISK_GB" 8
   validate_integer "CPU cores" "$CORES" 1
   validate_integer "Memory" "$MEMORY_MB" 512
@@ -932,6 +1002,7 @@ validate_settings() {
     die "Storage '${ROOTFS_STORAGE}' is not active or does not support LXC root disks."
   first_active_storage vztmpl | grep -Fxq "$TEMPLATE_STORAGE" ||
     die "Template storage '${TEMPLATE_STORAGE}' is not active or does not support container templates."
+  validate_storage_capacity
 }
 
 prepare_nfs_mount() {
@@ -1011,6 +1082,12 @@ create_container() {
   [[ -n "$NAMESERVER" ]] && args+=(--nameserver "$NAMESERVER")
   [[ -n "$ROOT_PASSWORD" ]] && args+=(--password "$ROOT_PASSWORD")
   [[ -n "$SSH_PUBLIC_KEY_FILE" ]] && args+=(--ssh-public-keys "$SSH_PUBLIC_KEY_FILE")
+  if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
+    args+=(--mp0 "${LOCAL_MEDIA_STORAGE}:${LOCAL_MEDIA_SIZE_GB},mp=/mnt/nas")
+  else
+    args+=(--mp0 "${HOST_NAS},mp=/mnt/nas")
+  fi
+  [[ "$ENABLE_QNAP" == "1" ]] && args+=(--mp1 "${HOST_QNAP},mp=/mnt/qnap")
 
   if pct status "$CTID" >/dev/null 2>&1; then
     if [[ "$REPLACE" == "1" ]]; then
@@ -1027,14 +1104,35 @@ create_container() {
   fi
 
   info "Creating CT${CTID} from ${template_ref}"
-  run "${args[@]}"
-  if [[ "$PRIMARY_STORAGE_MODE" == "local" ]]; then
-    run pct set "$CTID" -mp0 "${LOCAL_MEDIA_STORAGE}:${LOCAL_MEDIA_SIZE_GB},mp=/mnt/nas"
+  local create_status=0
+  if run "${args[@]}"; then
+    :
   else
-    run pct set "$CTID" -mp0 "${HOST_NAS},mp=/mnt/nas"
+    create_status=$?
+    if [[ "$ALLOW_PRIVILEGED_FALLBACK" == "1" ]] &&
+      grep -Fq "rootfs: Cannot open: Permission denied" "$LOG_FILE" &&
+      grep -Fq "lxc-usernsexec" "$LOG_FILE" &&
+      ! pct status "$CTID" >/dev/null 2>&1; then
+      fail_step "Unprivileged container creation failed"
+      warn "This host's storage/ACL configuration blocks Proxmox unprivileged template extraction."
+      warn "Retrying CT${CTID} as a privileged LXC. Fix the host ACL/noacl configuration to use unprivileged containers."
+      local index
+      for index in "${!args[@]}"; do
+        if [[ "${args[$index]}" == "--unprivileged" ]]; then
+          args[$(( index + 1 ))]=0
+          break
+        fi
+      done
+      PRIVILEGED_FALLBACK_USED=1
+      info "Retrying CT${CTID} with the compatible privileged LXC mode"
+      run "${args[@]}"
+    else
+      return "$create_status"
+    fi
   fi
-  run pct set "$CTID" -mp1 "${HOST_QNAP},mp=/mnt/qnap"
-  run pct set "$CTID" --tags "media;docker;jellyfin"
+  if ! run pct set "$CTID" --tags "media;docker;jellyfin"; then
+    warn "This Proxmox version did not accept optional container tags; continuing without them."
+  fi
 }
 
 has_nvidia_gpu() {
@@ -1525,6 +1623,9 @@ show_completion() {
     printf '  \033[38;5;99m├──────────────────────────────────────────────────────────────┤\033[0m\n'
     printf '  \033[38;5;99m│\033[0m  LXC             \033[1;97mCT%-5s %-42s\033[0m\033[38;5;99m│\033[0m\n' "$CTID" "(${CT_HOSTNAME})"
     printf '  \033[38;5;99m│\033[0m  Compose path    \033[38;5;45m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$APP_DIR"
+    if [[ "$PRIVILEGED_FALLBACK_USED" == "1" ]]; then
+      printf '  \033[38;5;99m│\033[0m  LXC security    \033[1;93m%-47s\033[0m\033[38;5;99m│\033[0m\n' "privileged fallback (host ACL incompatibility)"
+    fi
     printf '  \033[38;5;99m│\033[0m  Media Stack UI  \033[38;5;45m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$portal"
     printf '  \033[38;5;99m│\033[0m  Install log     \033[38;5;245m%-47s\033[0m\033[38;5;99m│\033[0m\n' "$LOG_FILE"
     printf '  \033[38;5;99m╰──────────────────────────────────────────────────────────────╯\033[0m\n'
@@ -1564,8 +1665,7 @@ main() {
   if [[ "$ENABLE_QNAP" == "1" ]]; then
     prepare_nfs_mount "secondary media" "$QNAP_EXPORT" "$HOST_QNAP" 1
   else
-    info "Secondary NAS disabled; ${HOST_QNAP} will be an empty optional bind path"
-    run mkdir -p "$HOST_QNAP"
+    info "Secondary NAS disabled"
   fi
 
   resolve_template

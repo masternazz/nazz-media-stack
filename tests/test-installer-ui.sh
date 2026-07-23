@@ -69,6 +69,6 @@ RESOLVED_TEMPLATE_REF="local:vztmpl/debian-test.tar.zst"
 ROOTFS_STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 create_output="$(create_container "$RESOLVED_TEMPLATE_REF")"
-grep -Fq 'pct set 998001 -mp0 firstmoonstorage:250\,mp=/mnt/nas' <<<"$create_output"
+grep -Fq -- '--mp0 firstmoonstorage:250\,mp=/mnt/nas' <<<"$create_output"
 
 printf 'installer UI mode tests passed\n'

@@ -1,7 +1,9 @@
 # Jellyfin Media Stack — one-command Proxmox installer
 
-Deploy a complete, auto-configured Jellyfin media stack into an unprivileged
-Debian LXC on a Proxmox VE host with a single command. Optional NVIDIA GPU
+Deploy a complete, auto-configured Jellyfin media stack into a Debian LXC on a
+Proxmox VE host with a single command. It uses an unprivileged LXC normally;
+if the host filesystem blocks Proxmox's unprivileged template extraction, the
+installer clearly warns and retries in compatible privileged mode. Optional NVIDIA GPU
 transcoding, onboard or NFS media storage, and a guided terminal UI are built in.
 
 The installer doesn't just start containers — it **wires the whole stack
@@ -110,6 +112,13 @@ space and lets you change both the pool and volume size before installation.
 Destroying/replacing that LXC also destroys its managed onboard media volume;
 the installer displays this warning before replacing an existing container.
 
+Some Proxmox hosts have ACLs disabled (`noacl`) on storage used for LXC
+root filesystems. Proxmox cannot extract an unprivileged template there. When
+that exact failure is detected, the installer removes no data itself and
+retries the already-cleaned creation in privileged mode. Pass
+`--no-privileged-fallback` if you prefer it to stop until the host ACL
+configuration is repaired.
+
 ### Unattended install
 
 ```bash
@@ -146,7 +155,7 @@ can be overridden by a flag or environment variable. Key settings:
 | Template storage | `--template-storage` | auto-detected active `vztmpl` storage |
 | Primary media type | `--media-storage nfs\|local` | NFS in unattended mode; prompted in guided mode |
 | Onboard media pool | `--local-media-storage` | active Proxmox storage with the most free space |
-| Onboard media size | `--local-media-size` | 100 GB |
+| Onboard media size | `--local-media-size` | auto-sized from free space, up to 100 GB |
 | NAS NFS export | `--nas-export` | required only for NFS mode |
 | Second NAS (optional) | `--enable-qnap` / `--qnap-export` | disabled |
 | Container DNS | `--nameserver` | inherit from the Proxmox host |
