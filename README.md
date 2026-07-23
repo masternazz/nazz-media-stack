@@ -163,6 +163,12 @@ can be overridden by a flag or environment variable. Key settings:
 | Timezone | `--timezone` | Proxmox host timezone |
 | GPU passthrough | `--gpu auto\|nvidia\|amd\|off` | auto-detect |
 
+Guided installs ask whether the container uses an untagged network or a tagged
+VLAN. Choose the same VLAN as another working application container when the
+Proxmox host uses a segmented network. Every install configures an LXC `root`
+console password; unless `--root-password` is supplied, it matches the shared
+application admin password displayed at completion.
+
 Before installing packages, the installer requires stable IPv4 DNS and an
 outbound HTTP connection to Debian's repository. APT updates treat partial
 repository failures as errors and retry instead of continuing with stale lists.

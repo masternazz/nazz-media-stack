@@ -118,7 +118,7 @@ Stack/env:
   --no-trash-profiles       Do not auto-apply TRaSH Guides quality profiles via Recyclarr
   --no-subtitle-repair-timer
                             Do not enable the safe weekly subtitle repair timer
-  --root-password PASS      Set root password for the LXC
+  --root-password PASS      Set LXC root password (default: shared admin password)
   --ssh-public-key-file     File containing SSH public key(s) for root
 
 Safety:
@@ -579,6 +579,42 @@ ui_primary_storage_menu() {
   esac
 }
 
+ui_network_menu() {
+  local default_choice="untagged"
+  local value=""
+  [[ -n "$VLAN_TAG" ]] && default_choice="tagged"
+
+  if use_whiptail; then
+    if ! value="$(whiptail --backtitle "$UI_BACKTITLE" --title "Container Network" \
+      --default-item "$default_choice" \
+      --menu "Choose how this LXC connects to the network. Use the same VLAN as other working application containers on this Proxmox host." 16 88 2 \
+      untagged "No VLAN tag (typical flat home network)" \
+      tagged "Tagged VLAN (segmented Proxmox network)" \
+      3>&1 1>&2 2>&3)"; then
+      die "Setup cancelled."
+    fi
+    printf '%s\n' "$value"
+    return
+  fi
+
+  value="$(ui_input "Container Network" "Network mode: untagged or tagged" "$default_choice")"
+  case "$value" in
+    untagged|tagged) printf '%s\n' "$value" ;;
+    *) warn "Unknown network mode '${value}', using untagged."; printf 'untagged\n' ;;
+  esac
+}
+
+collect_default_network() {
+  local network_mode=""
+  BRIDGE="$(ui_required_input "Container Network" "Proxmox bridge" "$BRIDGE")"
+  network_mode="$(ui_network_menu)"
+  if [[ "$network_mode" == "tagged" ]]; then
+    VLAN_TAG="$(ui_required_input "Container Network" "VLAN ID used by working application containers" "$VLAN_TAG")"
+  else
+    VLAN_TAG=""
+  fi
+}
+
 collect_primary_storage() {
   local advanced="${1:-0}"
   PRIMARY_STORAGE_MODE="$(ui_primary_storage_menu)"
@@ -614,6 +650,7 @@ collect_secondary_nas() {
 }
 
 collect_default_settings() {
+  collect_default_network
   collect_primary_storage 0
   collect_secondary_nas
   GPU_MODE="auto"
@@ -690,11 +727,12 @@ collect_login_settings() {
   fi
 
   MEDIASTACK_ADMIN_USER="$(ui_required_input "Shared Admin Login" "Admin username for Jellyfin, qBittorrent, Profilarr, and Portainer" "$MEDIASTACK_ADMIN_USER")"
-  MEDIASTACK_ADMIN_PASSWORD="$(ui_password "Shared Admin Login" "Admin password (12+ characters). Leave blank to generate one." "$MEDIASTACK_ADMIN_PASSWORD")"
+  MEDIASTACK_ADMIN_PASSWORD="$(ui_password "Shared Admin Login" "Admin password (12+ characters) for the apps and LXC root login. Leave blank to generate one." "$MEDIASTACK_ADMIN_PASSWORD")"
   if [[ -n "$MEDIASTACK_ADMIN_PASSWORD" && ${#MEDIASTACK_ADMIN_PASSWORD} -lt 12 ]]; then
     ui_message "Invalid Password" "The shared admin password must be at least 12 characters. Leave it blank to generate a strong password."
     MEDIASTACK_ADMIN_PASSWORD=""
   fi
+  resolve_login_credentials
 }
 
 settings_summary() {
@@ -721,6 +759,7 @@ Secondary NFS: $([[ "$ENABLE_QNAP" == "1" ]] && printf '%s -> %s -> /mnt/qnap' "
 GPU: ${GPU_MODE}
 Start / Auto-configure: $([[ "$START_STACK" == "1" ]] && printf yes || printf no) / $([[ "$AUTO_CONFIGURE" == "1" ]] && printf yes || printf no)
 Shared admin user: ${MEDIASTACK_ADMIN_USER}
+Container console: root / configured
 Replace existing CT: $([[ "$REPLACE" == "1" ]] && printf yes || printf no)
 EOF
 }
@@ -1019,7 +1058,30 @@ validate_integer() {
   (( 10#$value >= minimum )) || die "${label} must be at least ${minimum} (got '${value}')."
 }
 
+resolve_login_credentials() {
+  local existing_value=""
+
+  if [[ -n "$ENV_FILE" ]]; then
+    existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_USER=/{value=substr($0,index($0,"=")+1)} END{print value}' "$ENV_FILE")"
+    [[ -n "$existing_value" ]] && MEDIASTACK_ADMIN_USER="$existing_value"
+    existing_value="$(awk -F= '/^MEDIASTACK_ADMIN_PASSWORD=/{value=substr($0,index($0,"=")+1)} END{print value}' "$ENV_FILE")"
+    [[ -n "$existing_value" ]] && MEDIASTACK_ADMIN_PASSWORD="$existing_value"
+  fi
+
+  [[ -n "$MEDIASTACK_ADMIN_PASSWORD" ]] ||
+    MEDIASTACK_ADMIN_PASSWORD="$(rand_hex 18)"
+  [[ ${#MEDIASTACK_ADMIN_PASSWORD} -ge 12 ]] ||
+    die "The shared admin password must be at least 12 characters."
+
+  # A usable console login is part of every install. The CLI can still provide
+  # a separate root password explicitly with --root-password.
+  [[ -n "$ROOT_PASSWORD" ]] || ROOT_PASSWORD="$MEDIASTACK_ADMIN_PASSWORD"
+  [[ ${#ROOT_PASSWORD} -ge 8 ]] ||
+    die "The LXC root password must be at least 8 characters."
+}
+
 validate_settings() {
+  resolve_login_credentials
   resolve_nameserver
   resolve_local_media_size
   validate_integer "Disk size" "$DISK_GB" 8
@@ -1304,28 +1366,40 @@ start_container() {
   # stub (for example 127.0.0.53) leaves the LXC unable to resolve package hosts.
   run pct set "$CTID" --nameserver "$NAMESERVER"
   run pct exec "$CTID" -- sh -c \
-    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:5 single-request-reopen\n" "$1" > /etc/resolv.conf' \
+    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:2 single-request-reopen\n" "$1" > /etc/resolv.conf' \
     sh "$NAMESERVER"
+
+  local lxc_ip=""
+  lxc_ip="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  info "Waiting for CT${CTID} network (${lxc_ip:-no DHCP address yet}, ${BRIDGE}, VLAN $([[ -n "$VLAN_TAG" ]] && printf '%s' "$VLAN_TAG" || printf 'untagged'))"
 
   # `getent hosts` can succeed with only an AAAA response even when the guest
   # has no IPv6 route and IPv4 DNS is not ready. Require both an IPv4 answer
   # and the same outbound TCP path that Debian's HTTP repositories need.
   local ready_count=0
-  for _ in $(seq 1 90); do
-    if pct exec "$CTID" -- getent ahostsv4 deb.debian.org >/dev/null 2>&1 &&
-       pct exec "$CTID" -- timeout 8 bash -c \
+  local dns_ready=0
+  for _ in $(seq 1 15); do
+    if pct exec "$CTID" -- timeout 6 getent ahostsv4 deb.debian.org >/dev/null 2>&1; then
+      dns_ready=1
+      if pct exec "$CTID" -- timeout 6 bash -c \
          'exec 3<>/dev/tcp/deb.debian.org/80; exec 3>&-' \
          >/dev/null 2>&1; then
-      ready_count=$(( ready_count + 1 ))
-      if (( ready_count >= 3 )); then
-        return
+        ready_count=$(( ready_count + 1 ))
+        if (( ready_count >= 3 )); then
+          return
+        fi
+      else
+        ready_count=0
       fi
     else
       ready_count=0
     fi
     sleep 2
   done
-  die "CT${CTID} started, but IPv4 DNS/HTTP did not become reliable through ${NAMESERVER}. Check the bridge, VLAN, gateway, DNS policy, and firewall."
+  if [[ "$dns_ready" == "0" ]]; then
+    die "CT${CTID} received ${lxc_ip:-no DHCP address}, but IPv4 DNS through ${NAMESERVER} never became ready. Check ${BRIDGE}, the VLAN, DHCP, and DNS policy."
+  fi
+  die "CT${CTID} received ${lxc_ip:-a DHCP address} and resolved DNS, but cannot reach Debian over HTTP. The selected $([[ -n "$VLAN_TAG" ]] && printf 'VLAN %s' "$VLAN_TAG" || printf 'untagged network') has no working internet egress; rerun and choose the VLAN used by working application containers."
 }
 
 install_docker() {
@@ -1339,15 +1413,15 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 wait_for_dns() {
   local attempt
-  for attempt in $(seq 1 60); do
-    if getent ahostsv4 deb.debian.org >/dev/null 2>&1 &&
-       timeout 8 bash -c '"'"'exec 3<>/dev/tcp/deb.debian.org/80; exec 3>&-'"'"' \
+  for attempt in $(seq 1 20); do
+    if timeout 6 getent ahostsv4 deb.debian.org >/dev/null 2>&1 &&
+       timeout 6 bash -c '"'"'exec 3<>/dev/tcp/deb.debian.org/80; exec 3>&-'"'"' \
          >/dev/null 2>&1; then
       return
     fi
     sleep 2
   done
-  echo "IPv4 DNS/HTTP did not reach deb.debian.org after 120 seconds." >&2
+  echo "IPv4 DNS/HTTP did not reach deb.debian.org before the package-install timeout." >&2
   return 1
 }
 
@@ -1744,11 +1818,14 @@ show_completion() {
       printf '\n  \033[1;97mShared login\033[0m  %s / %s\n' "$MEDIASTACK_ADMIN_USER" "$MEDIASTACK_ADMIN_PASSWORD"
       printf '  \033[38;5;245mCredentials are also stored in %s/.env inside CT%s (mode 0600).\033[0m\n' "$APP_DIR" "$CTID"
     fi
+    printf '  \033[1;97mLXC console\033[0m  root / %s\n' "$ROOT_PASSWORD"
+    printf '  \033[38;5;245mChange the root password after first login with: passwd\033[0m\n'
     printf '  \033[38;5;245mOnly expose reviewed media ports; keep admin applications internal.\033[0m\n\n'
   else
     printf '%s CT%s (%s)\n' "$completion_label" "$CTID" "$CT_HOSTNAME"
     printf 'Compose path: %s\n' "$APP_DIR"
     printf 'Media Stack UI: %s\n' "$portal"
+    printf 'LXC console: root / %s\n' "$ROOT_PASSWORD"
     printf 'Install log: %s\n' "$LOG_FILE"
   fi
 }
