@@ -1387,7 +1387,7 @@ start_container() {
   # stub (for example 127.0.0.53) leaves the LXC unable to resolve package hosts.
   run pct set "$CTID" --nameserver "$NAMESERVER"
   run pct exec "$CTID" -- sh -c \
-    'rm -f /etc/resolv.conf; printf "nameserver %s\noptions timeout:2 attempts:2 single-request-reopen\n" "$1" > /etc/resolv.conf' \
+    'rm -f /etc/resolv.conf; umask 022; printf "nameserver %s\noptions timeout:2 attempts:2 single-request-reopen\n" "$1" > /etc/resolv.conf; chmod 0644 /etc/resolv.conf' \
     sh "$NAMESERVER"
 
   local lxc_ip=""
@@ -1450,7 +1450,11 @@ apt_retry() {
   local attempt
   for attempt in 1 2 3; do
     wait_for_dns
+    # The APT acquire-method sandbox can lose DNS inside otherwise healthy
+    # unprivileged Proxmox LXCs. Packages are installed as root regardless;
+    # keep the short-lived acquire workers as root for this bootstrap too.
     if apt-get \
+      -o APT::Sandbox::User=root \
       -o Acquire::Retries=3 \
       -o Acquire::ForceIPv4=true \
       -o APT::Update::Error-Mode=any \
@@ -1490,8 +1494,8 @@ install_amd_userspace() {
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
-apt-get update
-apt-get install -y --no-install-recommends mesa-va-drivers libva2 vainfo
+apt-get -o APT::Sandbox::User=root update
+apt-get -o APT::Sandbox::User=root install -y --no-install-recommends mesa-va-drivers libva2 vainfo
 '; then
     warn "AMD VAAPI userspace install did not complete; Jellyfin may still transcode using the drivers bundled in its image."
     return 0
@@ -1529,7 +1533,7 @@ Suites: \${VERSION_CODENAME}-security
 Components: contrib non-free non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
-apt-get update
+apt-get -o APT::Sandbox::User=root update
 candidate=\$(apt-cache policy nvidia-smi | awk '/Candidate:/ { print \$2; exit }')
 if [[ \"\$candidate\" != '${host_driver_version}' && \"\$candidate\" != '${host_driver_version}'-* && \"\$candidate\" != '${host_driver_version}'+* ]]; then
   printf 'ERROR: host NVIDIA driver is %s, but Debian offers nvidia-smi %s. Update the host driver or rerun with --no-nvidia.\n' '${host_driver_version}' \"\${candidate:-none}\" >&2
@@ -1547,7 +1551,7 @@ versioned=()
 for package in \"\${packages[@]}\"; do
   versioned+=(\"\${package}=\${candidate}\")
 done
-apt-get install -y --no-install-recommends \"\${versioned[@]}\"
+apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \"\${versioned[@]}\"
 nvidia-smi
 "
 }
